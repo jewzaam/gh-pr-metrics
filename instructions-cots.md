@@ -1,0 +1,1 @@
+let's also write a doc "COTS.md" that summarizes options for existing tools that can do this functionality.  Are they free, open source, paid?  Do they meet all the requirements in docs/requirements.md?

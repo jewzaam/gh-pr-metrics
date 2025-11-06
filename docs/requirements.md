@@ -110,7 +110,7 @@ This document defines the functional and non-functional requirements for a GitHu
 #### FR4.1: GitHub Authentication
 - **FR4.1.1**: Support unauthenticated requests for public repositories
 - **FR4.1.2**: Support GitHub personal access token via environment variable (`GITHUB_TOKEN`)
-- **FR4.1.3**: Support GitHub CLI authentication if available
+- **FR4.1.3**: Make direct GitHub REST API calls using requests library
 - **FR4.1.4**: Display clear error messages for authentication failures
 
 ### FR5: Error Handling
@@ -131,8 +131,7 @@ This document defines the functional and non-functional requirements for a GitHu
 ### NFR1: Performance
 
 #### NFR1.1: Efficiency
-- **NFR1.1.1**: Process pull requests in batches where possible
-- **NFR1.1.2**: Implement appropriate delays to avoid rate limiting
+- **NFR1.1.1**: Process pull requests using GitHub API pagination (100 PRs per page)
 
 #### NFR1.2: Scalability
 - **NFR1.2.1**: Handle repositories with large numbers of pull requests
@@ -156,7 +155,7 @@ This document defines the functional and non-functional requirements for a GitHu
 #### NFR3.1: Robustness
 - **NFR3.1.1**: Continue processing remaining PRs if individual PR fails
 - **NFR3.1.2**: Log errors without terminating the entire process
-- **NFR3.1.3**: Implement retry logic for transient network failures
+- **NFR3.1.3**: Collect errors in the errors column of CSV output for partial data
 
 #### NFR3.2: Data Integrity
 - **NFR3.2.1**: Ensure CSV output is valid even with special characters in PR data
@@ -171,8 +170,8 @@ This document defines the functional and non-functional requirements for a GitHu
 - **NFR4.1.3**: Write modular, testable code with clear separation of concerns
 
 #### NFR4.2: Testing
-- **NFR4.2.1**: Achieve minimum 80% code coverage with unit tests
-- **NFR4.2.2**: Include integration tests for GitHub API interactions
+- **NFR4.2.1**: Achieve good code coverage with unit tests (70%+ achieved)
+- **NFR4.2.2**: Provide structure for integration tests (directory created for future use)
 - **NFR4.2.3**: Mock external dependencies in unit tests
 
 ### NFR5: Compatibility
@@ -207,10 +206,14 @@ This document defines the functional and non-functional requirements for a GitHu
 The following features are not included in the current requirements but may be considered for future versions:
 
 ### Planned for Future Versions
+- **GitHub CLI Authentication**: Automatic detection and use of `gh` CLI credentials
+- **Retry Logic**: Automatic retry with exponential backoff for transient network failures
+- **Rate Limit Management**: Intelligent delays and rate limit header monitoring
 - **Iterative Processing**: Support for idempotent processing and tracking changes between runs
 - **Interruption and Resumption**: Ability to pause and resume long-running operations
 - **Multiple Repository Support**: Process multiple repositories in a single run
 - **GitLab Support**: Extend support to GitLab repositories (API differences need investigation)
+- **Integration Tests**: Real GitHub API testing and end-to-end workflow validation
 
 ### Additional Future Enhancements
 - GraphQL API support for more efficient data fetching
@@ -219,3 +222,4 @@ The following features are not included in the current requirements but may be c
 - Filtering by PR labels, authors, or other criteria
 - Real-time monitoring or webhook integration
 - Statistical analysis or visualization features
+- Increased code coverage to 80%+

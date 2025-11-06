@@ -58,11 +58,12 @@ make clean     # Remove temporary files and virtual environment
 ### Project Structure
 
 ```
-gh-pull-request-metrics/
+gh-pr-metrics/
 ├── src/
 │   └── gh_pr_metrics.py     # Main application
-├── tests/                   # Unit tests
-├── integration_tests/       # Integration tests (placeholder)
+├── tests/
+│   ├── unit/                # Unit tests
+│   └── integration/         # Integration tests (placeholder)
 ├── docs/                    # Documentation
 │   ├── requirements.md      # Detailed requirements
 │   └── unit-test-plan.md    # Test plan

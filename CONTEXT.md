@@ -19,7 +19,7 @@ This project implements a command-line tool that generates CSV reports containin
 
 ### Component Structure
 ```
-gh-pull-request-metrics/
+gh-pr-metrics/
 ├── src/                      # Source code directory
 │   └── gh_pr_metrics.py     # Main application (single file implementation)
 ├── tests/                    # Test suite

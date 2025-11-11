@@ -33,3 +33,28 @@ class TestDateParsing:
         """Test that invalid timestamp raises an error."""
         with pytest.raises(Exception):
             gh_pr_metrics.parse_timestamp("invalid")
+
+    def test_parse_timestamp_returns_timezone_aware(self):
+        """Test that parse_timestamp always returns timezone-aware datetimes."""
+        # ISO 8601 with timezone
+        result1 = gh_pr_metrics.parse_timestamp("2024-01-01T00:00:00Z")
+        assert result1.tzinfo is not None
+
+        # ISO 8601 without timezone (should add UTC)
+        result2 = gh_pr_metrics.parse_timestamp("2024-01-01T00:00:00")
+        assert result2.tzinfo is not None
+
+        # Unix timestamp (should add UTC)
+        result3 = gh_pr_metrics.parse_timestamp("1704067200")
+        assert result3.tzinfo is not None
+
+    def test_parse_timestamp_comparison_with_datetime_now_utc(self):
+        """Test that parsed timestamps can be compared with datetime.now(timezone.utc)."""
+        from datetime import datetime, timezone
+
+        # Parse a timestamp from the past
+        past_date = gh_pr_metrics.parse_timestamp("2024-01-01T00:00:00Z")
+        now = datetime.now(timezone.utc)
+
+        # This should not raise "can't compare offset-naive and offset-aware datetimes"
+        assert past_date < now

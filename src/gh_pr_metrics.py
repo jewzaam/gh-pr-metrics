@@ -14,7 +14,8 @@ import logging
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 
 try:
@@ -34,6 +35,7 @@ __version__ = "0.1.0"
 # Constants
 GITHUB_API_BASE = "https://api.github.com"
 DEFAULT_DAYS_BACK = 365
+DEFAULT_WORKERS = 4
 
 
 class GitHubAPIError(Exception):
@@ -94,13 +96,57 @@ def get_repo_from_git() -> tuple[Optional[str], Optional[str]]:
 
 
 def parse_timestamp(timestamp_str: str) -> datetime:
-    """Parse various timestamp formats to datetime."""
+    """Parse various timestamp formats to datetime (always returns timezone-aware)."""
     try:
         # Try Unix timestamp first
-        return datetime.fromtimestamp(float(timestamp_str))
+        dt = datetime.fromtimestamp(float(timestamp_str))
+        # Make timezone-aware if naive
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except (ValueError, OverflowError):
         # Try ISO 8601 / RFC 3339
-        return date_parser.parse(timestamp_str)
+        dt = date_parser.parse(timestamp_str)
+        # Make timezone-aware if naive
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
+
+def check_rate_limit(token: Optional[str] = None) -> None:
+    """Check and display current GitHub API rate limit status."""
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        response = requests.get(f"{GITHUB_API_BASE}/rate_limit", headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        core = data.get("resources", {}).get("core", {})
+        remaining = core.get("remaining", "unknown")
+        limit = core.get("limit", "unknown")
+        reset_timestamp = core.get("reset", 0)
+        
+        if reset_timestamp:
+            from datetime import datetime
+            reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
+            reset_str = reset_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+        else:
+            reset_str = "unknown"
+        
+        logging.info(
+            "API rate limit: %s/%s remaining (resets at %s)",
+            remaining,
+            limit,
+            reset_str,
+        )
+    except Exception as e:
+        logging.debug("Could not check rate limit: %s", e)
 
 
 def make_github_request(
@@ -117,12 +163,38 @@ def make_github_request(
     try:
         response = requests.get(url, headers=headers, params=params, timeout=30)
         response.raise_for_status()
+        
+        # Log rate limit info on first request (debug only)
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            rate_limit = response.headers.get("X-RateLimit-Remaining")
+            rate_limit_reset = response.headers.get("X-RateLimit-Reset")
+            if rate_limit:
+                logging.debug(
+                    "API rate limit: %s remaining (resets at %s)",
+                    rate_limit,
+                    rate_limit_reset,
+                )
+        
         return response.json()
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 403:
-            raise GitHubAPIError(
-                "GitHub API rate limit exceeded. Set GITHUB_TOKEN environment variable."
-            )
+            # Check if it's actually a rate limit error
+            rate_limit = e.response.headers.get("X-RateLimit-Remaining")
+            if rate_limit == "0":
+                reset_time = e.response.headers.get("X-RateLimit-Reset", "unknown")
+                auth_status = "authenticated" if token else "unauthenticated"
+                raise GitHubAPIError(
+                    f"GitHub API rate limit exceeded ({auth_status}). "
+                    f"Rate limit resets at {reset_time}. "
+                    f"Limit: {e.response.headers.get('X-RateLimit-Limit', 'unknown')}"
+                )
+            else:
+                # 403 but not rate limit - likely permissions
+                raise GitHubAPIError(
+                    "GitHub API forbidden: insufficient permissions or invalid token."
+                )
+        elif e.response.status_code == 401:
+            raise GitHubAPIError("GitHub API unauthorized: invalid or expired token.")
         elif e.response.status_code == 404:
             raise GitHubAPIError("Repository not found or insufficient permissions.")
         else:
@@ -140,7 +212,7 @@ def fetch_pull_requests(
     page = 1
     per_page = 100
 
-    logging.info("Fetching pull requests from %s/%s", owner, repo)
+    logging.info("Fetching pull requests from %s/%s (page size: %d)", owner, repo, per_page)
 
     while True:
         params = {
@@ -156,25 +228,42 @@ def fetch_pull_requests(
         if not prs:
             break
 
+        prs_in_page = len(prs)
+        prs_in_range = 0
+
         for pr in prs:
             created_at = date_parser.parse(pr["created_at"])
             # Stop if we're before the start date
             if created_at < start_date:
-                logging.debug("Reached PRs before start date, stopping")
+                logging.info(
+                    "Page %d: fetched %d PRs, %d in date range, %d cumulative (reached start date)",
+                    page,
+                    prs_in_page,
+                    prs_in_range,
+                    len(all_prs),
+                )
+                logging.info("Finished fetching: %d total PRs in date range", len(all_prs))
                 return all_prs
 
             # Only include PRs within date range
             if start_date <= created_at <= end_date:
                 all_prs.append(pr)
+                prs_in_range += 1
 
-        logging.info("Fetched page %d: %d PRs total", page, len(all_prs))
+        logging.info(
+            "Page %d: fetched %d PRs, %d in date range, %d cumulative",
+            page,
+            prs_in_page,
+            prs_in_range,
+            len(all_prs),
+        )
         page += 1
 
         # Break if we got fewer results than requested
         if len(prs) < per_page:
+            logging.info("Finished fetching: %d total PRs in date range", len(all_prs))
             break
 
-    logging.info("Total PRs found: %d", len(all_prs))
     return all_prs
 
 
@@ -409,6 +498,12 @@ Environment Variables:
     )
     parser.add_argument("--output", "-o", help="Output file path (default: stdout)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=f"Number of parallel workers for processing PRs (default: {DEFAULT_WORKERS})",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     if ARGCOMPLETE_AVAILABLE:
@@ -444,7 +539,7 @@ def main() -> int:
     logging.info("Repository: %s/%s", owner, repo)
 
     # Get time range
-    end_date = parse_timestamp(args.end) if args.end else datetime.now()
+    end_date = parse_timestamp(args.end) if args.end else datetime.now(timezone.utc)
     start_date = (
         parse_timestamp(args.start) if args.start else end_date - timedelta(days=DEFAULT_DAYS_BACK)
     )
@@ -462,6 +557,17 @@ def main() -> int:
             "No GITHUB_TOKEN found. API rate limits will be restrictive "
             "for unauthenticated requests."
         )
+        # Force single worker to avoid hitting rate limits too quickly
+        if args.workers > 1:
+            logging.warning("Forcing --workers=1 due to missing GITHUB_TOKEN")
+            workers = 1
+        else:
+            workers = args.workers
+    else:
+        workers = args.workers
+    
+    # Check and display rate limit status
+    check_rate_limit(token)
 
     try:
         # Fetch PRs
@@ -471,13 +577,30 @@ def main() -> int:
             logging.warning("No pull requests found in the specified date range")
             return 0
 
-        # Process each PR
+        # Process each PR with thread pool
         metrics = []
         total_prs = len(prs)
-        for i, pr in enumerate(prs, 1):
-            logging.info("Processing PR %d/%d: #%d", i, total_prs, pr["number"])
-            pr_metrics = process_pr(pr, owner, repo, token)
-            metrics.append(pr_metrics)
+        completed = 0
+
+        logging.info("Processing %d PRs with %d workers", total_prs, workers)
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            # Submit all PR processing tasks
+            future_to_pr = {
+                executor.submit(process_pr, pr, owner, repo, token): pr for pr in prs
+            }
+
+            # Collect results as they complete
+            for future in as_completed(future_to_pr):
+                pr = future_to_pr[future]
+                completed += 1
+                try:
+                    pr_metrics = future.result()
+                    metrics.append(pr_metrics)
+                    logging.info("Completed PR %d/%d: #%d", completed, total_prs, pr["number"])
+                except Exception as e:
+                    logging.error("Failed to process PR #%d: %s", pr["number"], e)
+                    # Continue processing other PRs
 
         # Write output
         write_csv_output(metrics, args.output)

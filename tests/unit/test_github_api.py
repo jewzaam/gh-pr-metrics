@@ -43,7 +43,16 @@ class TestGitHubAPIClient:
     def test_make_github_request_rate_limit_error(self, requests_mock):
         """Test handling of rate limit errors."""
         url = "https://api.github.com/repos/owner/repo"
-        requests_mock.get(url, status_code=403, json={"message": "rate limit"})
+        requests_mock.get(
+            url,
+            status_code=403,
+            json={"message": "rate limit"},
+            headers={
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Limit": "5000",
+                "X-RateLimit-Reset": "1699999999",
+            },
+        )
 
         with pytest.raises(gh_pr_metrics.GitHubAPIError, match="rate limit"):
             gh_pr_metrics.make_github_request(url)

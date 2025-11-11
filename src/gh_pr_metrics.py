@@ -126,19 +126,20 @@ def check_rate_limit(token: Optional[str] = None) -> None:
         response = requests.get(f"{GITHUB_API_BASE}/rate_limit", headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
-        
+
         core = data.get("resources", {}).get("core", {})
         remaining = core.get("remaining", "unknown")
         limit = core.get("limit", "unknown")
         reset_timestamp = core.get("reset", 0)
-        
+
         if reset_timestamp:
             from datetime import datetime
+
             reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
             reset_str = reset_time.strftime("%Y-%m-%d %H:%M:%S UTC")
         else:
             reset_str = "unknown"
-        
+
         logging.info(
             "API rate limit: %s/%s remaining (resets at %s)",
             remaining,
@@ -163,7 +164,7 @@ def make_github_request(
     try:
         response = requests.get(url, headers=headers, params=params, timeout=30)
         response.raise_for_status()
-        
+
         # Log rate limit info on first request (debug only)
         if logging.getLogger().isEnabledFor(logging.DEBUG):
             rate_limit = response.headers.get("X-RateLimit-Remaining")
@@ -174,7 +175,7 @@ def make_github_request(
                     rate_limit,
                     rate_limit_reset,
                 )
-        
+
         return response.json()
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 403:
@@ -565,7 +566,7 @@ def main() -> int:
             workers = args.workers
     else:
         workers = args.workers
-    
+
     # Check and display rate limit status
     check_rate_limit(token)
 
@@ -586,9 +587,7 @@ def main() -> int:
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             # Submit all PR processing tasks
-            future_to_pr = {
-                executor.submit(process_pr, pr, owner, repo, token): pr for pr in prs
-            }
+            future_to_pr = {executor.submit(process_pr, pr, owner, repo, token): pr for pr in prs}
 
             # Collect results as they complete
             for future in as_completed(future_to_pr):

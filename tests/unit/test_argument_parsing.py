@@ -52,6 +52,18 @@ class TestArgumentParsing:
             assert args.start == "2024-01-01"
             assert args.end == "2024-12-31"
 
+    def test_parse_arguments_with_workers(self):
+        """Test parsing with workers argument."""
+        with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--workers", "8"]):
+            args = gh_pr_metrics.parse_arguments()
+            assert args.workers == 8
+
+    def test_parse_arguments_workers_default(self):
+        """Test that workers defaults to 4."""
+        with mock.patch.object(sys, "argv", ["gh-pr-metrics"]):
+            args = gh_pr_metrics.parse_arguments()
+            assert args.workers == 4
+
 
 class TestLoggingSetup:
     """Test logging configuration."""

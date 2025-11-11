@@ -29,11 +29,14 @@ requirements-dev: venv uv ## Install all dev dependencies
 	@$(VENV_UV) pip install -e ".[dev]"
 	@echo "✅ All dev dependencies installed in $(VENV_DIR)"
 
-install-package: requirements-dev ## Install package in editable mode (alias for requirements-dev)
-	@echo "✅ Package already installed in editable mode"
+install-package: requirements-dev ## Install package in editable mode (needed for tests)
+	@$(VENV_UV) pip install -e .
+	@echo "✅ Package installed in editable mode in $(VENV_DIR)"
 
-install: requirements ## Install tool with runtime dependencies only
-	@echo "✅ Tool installed in $(VENV_DIR)"
+install: ## Install package to user environment (~/.local)
+	@pip install --user -e .
+	@echo "✅ Package installed in editable mode to user environment"
+	@echo "   If 'gh-pr-metrics' command is not found, ensure ~/.local/bin is in your PATH"
 
 clean: ## Remove temporary and backup files
 	# Python caches

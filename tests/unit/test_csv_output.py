@@ -20,6 +20,8 @@ class TestCSVOutput:
                 "author": "testuser",
                 "created_at": "2024-01-01T00:00:00Z",
                 "ready_for_review_at": "2024-01-01T00:00:00Z",
+                "merged_at": "",
+                "closed_at": "",
                 "total_comment_count": 5,
                 "bot_comment_count": 2,
                 "changes_requested_count": 1,
@@ -49,6 +51,8 @@ class TestCSVOutput:
                 "author": "testuser",
                 "created_at": "2024-01-01T00:00:00Z",
                 "ready_for_review_at": "2024-01-01T00:00:00Z",
+                "merged_at": "",
+                "closed_at": "",
                 "total_comment_count": 5,
                 "bot_comment_count": 2,
                 "changes_requested_count": 1,
@@ -77,6 +81,8 @@ class TestCSVOutput:
                 "author": "testuser",
                 "created_at": "2024-01-01T00:00:00Z",
                 "ready_for_review_at": "2024-01-01T00:00:00Z",
+                "merged_at": "",
+                "closed_at": "",
                 "total_comment_count": 0,
                 "bot_comment_count": 0,
                 "changes_requested_count": 0,
@@ -107,3 +113,36 @@ class TestCSVOutput:
         result = output.getvalue()
         # Should not write anything for empty metrics
         assert result == ""
+
+    def test_write_csv_with_merged_and_closed_timestamps(self, tmp_path):
+        """Test CSV output includes merged_at and closed_at timestamps."""
+        metrics = [
+            {
+                "pr_number": 1,
+                "title": "Merged PR",
+                "author": "testuser",
+                "created_at": "2024-01-01T00:00:00Z",
+                "ready_for_review_at": "2024-01-01T00:00:00Z",
+                "merged_at": "2024-01-05T12:00:00Z",
+                "closed_at": "2024-01-05T12:00:00Z",
+                "total_comment_count": 3,
+                "bot_comment_count": 1,
+                "changes_requested_count": 0,
+                "unique_change_requesters": 0,
+                "approval_count": 2,
+                "status": "merged",
+                "url": "https://github.com/owner/repo/pull/1",
+                "errors": "",
+            }
+        ]
+
+        output_file = tmp_path / "test.csv"
+        gh_pr_metrics.write_csv_output(metrics, str(output_file))
+
+        # Read back and verify CSV contains the timestamps
+        with open(output_file, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            assert len(rows) == 1
+            assert rows[0]["merged_at"] == "2024-01-05T12:00:00Z"
+            assert rows[0]["closed_at"] == "2024-01-05T12:00:00Z"

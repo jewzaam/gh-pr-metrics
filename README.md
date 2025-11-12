@@ -7,7 +7,7 @@ A command-line tool to generate CSV reports containing key metrics for all pull 
 ## What It Does
 
 Analyzes GitHub pull requests and generates CSV reports with metrics including:
-- PR creation and ready-for-review timestamps
+- PR creation, ready-for-review, merged, and closed timestamps
 - Comment counts (total and bot-specific)
 - Change request counts (total and unique reviewers)
 - Approval counts and PR status
@@ -44,10 +44,10 @@ Set `GITHUB_TOKEN` environment variable for private repositories or to avoid rat
 Example output:
 
 ```csv
-pr_number,created_at,ready_for_review_at,comments_total,comments_bot,change_requests_total,change_requests_unique,approvals,status,errors
-123,2024-01-15T10:30:00Z,2024-01-15T14:20:00Z,15,3,2,2,3,merged,
-124,2024-01-16T09:15:00Z,,8,1,0,0,1,open,
-125,2024-01-17T11:00:00Z,2024-01-18T08:30:00Z,22,5,4,3,2,closed,
+pr_number,created_at,ready_for_review_at,merged_at,closed_at,comments_total,comments_bot,change_requests_total,change_requests_unique,approvals,status,errors
+123,2024-01-15T10:30:00Z,2024-01-15T14:20:00Z,2024-01-16T09:00:00Z,2024-01-16T09:00:00Z,15,3,2,2,3,merged,
+124,2024-01-16T09:15:00Z,,,,8,1,0,0,1,open,
+125,2024-01-17T11:00:00Z,2024-01-18T08:30:00Z,,2024-01-19T12:00:00Z,22,5,4,3,2,closed,
 ```
 
 ### Column Descriptions
@@ -55,6 +55,8 @@ pr_number,created_at,ready_for_review_at,comments_total,comments_bot,change_requ
 - `pr_number` - Pull request number
 - `created_at` - ISO 8601 timestamp when PR was created
 - `ready_for_review_at` - ISO 8601 timestamp when PR was marked ready (empty for draft PRs)
+- `merged_at` - ISO 8601 timestamp when PR was merged (empty if not merged)
+- `closed_at` - ISO 8601 timestamp when PR was closed (empty if still open)
 - `comments_total` - Total comments (includes bot comments)
 - `comments_bot` - Bot comments only
 - `change_requests_total` - Total change requests submitted

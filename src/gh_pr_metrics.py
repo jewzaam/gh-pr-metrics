@@ -423,6 +423,10 @@ def process_pr(pr: Dict[str, Any], owner: str, repo: str, token: Optional[str]) 
     # Status
     metrics["status"] = determine_pr_status(pr)
 
+    # Merged and closed timestamps
+    metrics["merged_at"] = pr.get("merged_at") or ""
+    metrics["closed_at"] = pr.get("closed_at") or ""
+
     # Errors
     metrics["errors"] = "; ".join(errors) if errors else ""
 
@@ -441,6 +445,8 @@ def write_csv_output(metrics: List[Dict[str, Any]], output_file: Optional[str]) 
         "author",
         "created_at",
         "ready_for_review_at",
+        "merged_at",
+        "closed_at",
         "total_comment_count",
         "bot_comment_count",
         "changes_requested_count",

@@ -13,17 +13,71 @@ class TestPRStatusDetermination:
         status = gh_pr_metrics.determine_pr_status(pr)
         assert status == "draft"
 
-    def test_determine_merged_status(self):
-        """Test identifying merged PRs."""
-        pr = {"draft": False, "state": "closed", "merged_at": "2024-01-01T00:00:00Z"}
+    def test_determine_merged_status(self, requests_mock):
+        """Test identifying merged PRs and extracting merge timestamp."""
+        pr = {
+            "number": 1,
+            "title": "Merged PR",
+            "user": {"login": "testuser"},
+            "draft": False,
+            "state": "closed",
+            "merged_at": "2024-01-05T12:00:00Z",
+            "closed_at": "2024-01-05T12:00:00Z",
+            "created_at": "2024-01-01T00:00:00Z",
+            "html_url": "https://github.com/owner/repo/pull/1",
+            "comments_url": "https://api.github.com/repos/owner/repo/issues/1/comments",
+            "review_comments_url": "https://api.github.com/repos/owner/repo/pulls/1/comments",
+        }
+
+        # Test status determination
         status = gh_pr_metrics.determine_pr_status(pr)
         assert status == "merged"
 
-    def test_determine_closed_status(self):
-        """Test identifying closed (not merged) PRs."""
-        pr = {"draft": False, "state": "closed", "merged_at": None}
+        # Test full PR processing extracts timestamps
+        events_url = "https://api.github.com/repos/owner/repo/issues/1/events"
+        reviews_url = "https://api.github.com/repos/owner/repo/pulls/1/reviews"
+        requests_mock.get(events_url, json=[])
+        requests_mock.get(pr["comments_url"], json=[])
+        requests_mock.get(pr["review_comments_url"], json=[])
+        requests_mock.get(reviews_url, json=[])
+
+        result = gh_pr_metrics.process_pr(pr, "owner", "repo", None)
+        assert result["merged_at"] == "2024-01-05T12:00:00Z"
+        assert result["closed_at"] == "2024-01-05T12:00:00Z"
+        assert result["status"] == "merged"
+
+    def test_determine_closed_status(self, requests_mock):
+        """Test identifying closed (not merged) PRs and extracting close timestamp."""
+        pr = {
+            "number": 2,
+            "title": "Closed PR",
+            "user": {"login": "testuser"},
+            "draft": False,
+            "state": "closed",
+            "merged_at": None,
+            "closed_at": "2024-01-10T15:30:00Z",
+            "created_at": "2024-01-08T00:00:00Z",
+            "html_url": "https://github.com/owner/repo/pull/2",
+            "comments_url": "https://api.github.com/repos/owner/repo/issues/2/comments",
+            "review_comments_url": "https://api.github.com/repos/owner/repo/pulls/2/comments",
+        }
+
+        # Test status determination
         status = gh_pr_metrics.determine_pr_status(pr)
         assert status == "closed"
+
+        # Test full PR processing extracts timestamps
+        events_url = "https://api.github.com/repos/owner/repo/issues/2/events"
+        reviews_url = "https://api.github.com/repos/owner/repo/pulls/2/reviews"
+        requests_mock.get(events_url, json=[])
+        requests_mock.get(pr["comments_url"], json=[])
+        requests_mock.get(pr["review_comments_url"], json=[])
+        requests_mock.get(reviews_url, json=[])
+
+        result = gh_pr_metrics.process_pr(pr, "owner", "repo", None)
+        assert result["merged_at"] == ""  # Not merged
+        assert result["closed_at"] == "2024-01-10T15:30:00Z"
+        assert result["status"] == "closed"
 
     def test_determine_open_status(self):
         """Test identifying open PRs."""

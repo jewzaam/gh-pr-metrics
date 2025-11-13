@@ -289,14 +289,22 @@ def get_ready_for_review_time(
 
 
 def count_comments(
-    pr: Dict[str, Any], owner: str, repo: str, token: Optional[str]
-) -> tuple[int, int]:
+    pr: Dict[str, Any], owner: str, repo: str, token: Optional[str], ai_bot_pattern: str = None
+) -> tuple[int, int, int, str, str]:
     """
-    Count total comments and bot comments.
-    Returns (total_comments, bot_comments).
+    Count total comments, non-AI bot comments, and AI bot comments.
+    Returns (total_comments, non_ai_bot_comments, ai_bot_comments,
+             non_ai_bot_login_names, ai_bot_login_names).
+    Non-AI bot and AI bot login names are comma-separated strings.
+    ai_bot_pattern: regex pattern to identify AI bots
     """
+    import re
+
     total_comments = 0
-    bot_comments = 0
+    non_ai_bot_comments = 0
+    ai_bot_comments = 0
+    non_ai_bot_logins = set()
+    ai_bot_logins = set()
 
     # Issue comments (general PR comments)
     comments_url = pr["comments_url"]
@@ -305,7 +313,13 @@ def count_comments(
         for comment in comments:
             total_comments += 1
             if comment.get("user", {}).get("type") == "Bot":
-                bot_comments += 1
+                login = comment["user"]["login"]
+                if ai_bot_pattern and re.match(ai_bot_pattern, login):
+                    ai_bot_logins.add(login)
+                    ai_bot_comments += 1
+                else:
+                    non_ai_bot_logins.add(login)
+                    non_ai_bot_comments += 1
     except GitHubAPIError as e:
         logging.debug("Failed to fetch comments for PR #%d: %s", pr["number"], e)
 
@@ -316,11 +330,27 @@ def count_comments(
         for comment in review_comments:
             total_comments += 1
             if comment.get("user", {}).get("type") == "Bot":
-                bot_comments += 1
+                login = comment["user"]["login"]
+                if ai_bot_pattern and re.match(ai_bot_pattern, login):
+                    ai_bot_logins.add(login)
+                    ai_bot_comments += 1
+                else:
+                    non_ai_bot_logins.add(login)
+                    non_ai_bot_comments += 1
     except GitHubAPIError as e:
         logging.debug("Failed to fetch review comments for PR #%d: %s", pr["number"], e)
 
-    return total_comments, bot_comments
+    # Convert to comma-separated strings, sorted for consistency
+    non_ai_bot_login_names = ",".join(sorted(non_ai_bot_logins))
+    ai_bot_login_names = ",".join(sorted(ai_bot_logins))
+
+    return (
+        total_comments,
+        non_ai_bot_comments,
+        ai_bot_comments,
+        non_ai_bot_login_names,
+        ai_bot_login_names,
+    )
 
 
 def get_review_metrics(
@@ -374,7 +404,9 @@ def determine_pr_status(pr: Dict[str, Any]) -> str:
         return "open"
 
 
-def process_pr(pr: Dict[str, Any], owner: str, repo: str, token: Optional[str]) -> Dict[str, Any]:
+def process_pr(
+    pr: Dict[str, Any], owner: str, repo: str, token: Optional[str], ai_bot_pattern: str = None
+) -> Dict[str, Any]:
     """Process a single PR and extract all metrics."""
     pr_number = pr["number"]
     logging.debug("Processing PR #%d: %s", pr_number, pr["title"])
@@ -398,13 +430,21 @@ def process_pr(pr: Dict[str, Any], owner: str, repo: str, token: Optional[str]) 
 
     # Comment counts
     try:
-        total_comments, bot_comments = count_comments(pr, owner, repo, token)
+        total_comments, non_ai_bot_comments, ai_bot_comments, non_ai_bot_names, ai_bot_names = (
+            count_comments(pr, owner, repo, token, ai_bot_pattern)
+        )
         metrics["total_comment_count"] = total_comments
-        metrics["bot_comment_count"] = bot_comments
+        metrics["non_ai_bot_comment_count"] = non_ai_bot_comments
+        metrics["ai_bot_comment_count"] = ai_bot_comments
+        metrics["non_ai_bot_login_names"] = non_ai_bot_names
+        metrics["ai_bot_login_names"] = ai_bot_names
     except Exception as e:
         logging.debug("Error counting comments for PR #%d: %s", pr_number, e)
         metrics["total_comment_count"] = 0
-        metrics["bot_comment_count"] = 0
+        metrics["non_ai_bot_comment_count"] = 0
+        metrics["ai_bot_comment_count"] = 0
+        metrics["non_ai_bot_login_names"] = ""
+        metrics["ai_bot_login_names"] = ""
         errors.append(f"comments: {e}")
 
     # Review metrics
@@ -448,7 +488,10 @@ def write_csv_output(metrics: List[Dict[str, Any]], output_file: Optional[str]) 
         "merged_at",
         "closed_at",
         "total_comment_count",
-        "bot_comment_count",
+        "non_ai_bot_comment_count",
+        "ai_bot_comment_count",
+        "non_ai_bot_login_names",
+        "ai_bot_login_names",
         "changes_requested_count",
         "unique_change_requesters",
         "approval_count",
@@ -510,6 +553,11 @@ Environment Variables:
         type=int,
         default=DEFAULT_WORKERS,
         help=f"Number of parallel workers for processing PRs (default: {DEFAULT_WORKERS})",
+    )
+    parser.add_argument(
+        "--ai-bot-regex",
+        default="cursor\\[bot\\]",
+        help="Regex pattern to identify AI bots (default: cursor\\[bot\\])",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
@@ -593,7 +641,10 @@ def main() -> int:
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             # Submit all PR processing tasks
-            future_to_pr = {executor.submit(process_pr, pr, owner, repo, token): pr for pr in prs}
+            future_to_pr = {
+                executor.submit(process_pr, pr, owner, repo, token, args.ai_bot_regex): pr
+                for pr in prs
+            }
 
             # Collect results as they complete
             for future in as_completed(future_to_pr):

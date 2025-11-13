@@ -119,7 +119,16 @@ integration_tests/
   - Review comments only
   - Mixed comment types
   - Zero comments
-  - Bot comment filtering (if implemented)
+- **Test bot comment detection**
+  - Bot comments identified by type == "Bot"
+  - Human comments (type == "User")
+  - Mixed bot and human comments
+  - Bot login names collected (comma-separated)
+- **Test AI bot comment detection**
+  - AI bot (cursor[bot]) identified correctly
+  - AI bot comments counted separately
+  - AI bot login names collected
+  - Non-AI bot comments excluded from AI count
 
 #### 3.4 Review Metrics
 - **Test change request counting**

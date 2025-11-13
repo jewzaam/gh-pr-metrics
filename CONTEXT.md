@@ -130,12 +130,15 @@ gh-pr-metrics/
 2. `created_at`: ISO 8601 timestamp when PR was created
 3. `ready_for_review_at`: ISO 8601 timestamp when PR became ready (or created_at if never draft)
 4. `comments_total`: Total number of comments (integer)
-5. `comments_bot`: Number of bot comments (integer, identified by `[bot]` in username)
-6. `change_requests_total`: Total number of "changes requested" reviews (integer)
-7. `change_requests_unique`: Number of unique reviewers who requested changes (integer)
-8. `approvals`: Number of approvals (integer, latest state per reviewer)
-9. `status`: One of: `draft`, `open`, `closed`, `merged`
-10. `errors`: Optional column, only present if errors occurred during processing
+5. `non_ai_bot_comment_count`: Number of non-AI bot comments (integer, excludes AI bots)
+6. `ai_bot_comment_count`: Number of AI bot comments (integer)
+7. `non_ai_bot_login_names`: Comma-separated list of non-AI bot logins that commented
+8. `ai_bot_login_names`: Comma-separated list of AI bot logins that commented
+9. `change_requests_total`: Total number of "changes requested" reviews (integer)
+10. `change_requests_unique`: Number of unique reviewers who requested changes (integer)
+11. `approvals`: Number of approvals (integer, latest state per reviewer)
+12. `status`: One of: `draft`, `open`, `closed`, `merged`
+13. `errors`: Optional column, only present if errors occurred during processing
 
 ### Format Details
 - RFC 4180 compliant CSV
@@ -186,8 +189,11 @@ change_requests_total = len(change_requests_by_user)
 change_requests_unique = len(set(change_requests_by_user))
 ```
 
-### Counting Comments (Bot vs. Human)
+### Counting Comments (Non-AI Bot vs. AI Bot)
 ```python
+# AI bots hardcoded list (based on analysis)
+AI_BOTS = ["cursor[bot]"]
+
 def count_comments(pr_number, owner, repo, token):
     # Fetch both review comments and issue comments
     review_comments = fetch_review_comments(owner, repo, pr_number, token)
@@ -196,9 +202,29 @@ def count_comments(pr_number, owner, repo, token):
     all_comments = review_comments + issue_comments
     
     total = len(all_comments)
-    bot_count = sum(1 for c in all_comments if "[bot]" in c["user"]["login"])
     
-    return total, bot_count
+    # Collect bot logins and counts (separate AI from non-AI)
+    non_ai_bot_logins = set()
+    ai_bot_logins = set()
+    non_ai_bot_count = 0
+    ai_bot_count = 0
+    
+    for c in all_comments:
+        if c.get("user", {}).get("type") == "Bot":
+            login = c["user"]["login"]
+            
+            if re.match(ai_bot_pattern, login):
+                ai_bot_logins.add(login)
+                ai_bot_count += 1
+            else:
+                non_ai_bot_logins.add(login)
+                non_ai_bot_count += 1
+    
+    # Convert to comma-separated strings, sorted for consistency
+    non_ai_bot_names = ",".join(sorted(non_ai_bot_logins))
+    ai_bot_names = ",".join(sorted(ai_bot_logins))
+    
+    return total, non_ai_bot_count, ai_bot_count, non_ai_bot_names, ai_bot_names
 ```
 
 ### Repository Detection from Git Config
@@ -301,8 +327,29 @@ Install with: `pip install -e ".[dev]"`
 ### Challenge: Bot Comment Detection
 **Solution**:
 - Check for `[bot]` suffix in username (GitHub convention)
-- Examples: `dependabot[bot]`, `github-actions[bot]`
+- Examples: `dependabot[bot]`, `github-actions[bot]`, `cursor[bot]`
 - Separate metric for bot vs. human comments
+- GitHub API also provides `type: "Bot"` for reliable detection
+
+**Bot Categories**:
+- **AI Review Bots**: `cursor[bot]` - Generates structured code reviews with bug analysis
+- **Simple Automation**: `github-actions[bot]`, `openshift-ci[bot]`, `sonarqubecloud[bot]` - CI/CD status, test results
+
+**API Detection**:
+```python
+# Current implementation uses type field (correct approach)
+if comment.get("user", {}).get("type") == "Bot":
+    bot_comments += 1
+
+# Alternative: Username suffix (less reliable, depends on naming convention)
+is_bot = "[bot]" in user["login"]
+
+# Get bot details via API
+# gh api /users/{bot-name}%5Bbot%5D
+# Returns: {login, type: "Bot", html_url: "https://github.com/apps/{app-name}"}
+```
+
+**Implementation**: Separated AI review bots from simple automation bots. AI bots identified via configurable regex pattern (default: `cursor\[bot\]`) and tracked separately with dedicated columns for count and names. Pattern customizable via `--ai-bot-regex` CLI argument. Setting pattern to empty string or None disables AI bot detection (all bots treated as non-AI).
 
 ### Challenge: Time Zone Issues
 **Solution**:

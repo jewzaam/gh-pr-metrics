@@ -31,6 +31,12 @@ gh-pr-metrics
 
 # Public repository example (no token required)
 gh-pr-metrics --owner ansible --repo awx --start 2025-11-01 --end 2025-11-05 --output /tmp/awx-metrics.csv
+
+# Custom AI bot pattern (match multiple AI bots)
+gh-pr-metrics --ai-bot-regex "cursor\\[bot\\]|copilot\\[bot\\]"
+
+# Disable AI bot detection (treat all bots as non-AI)
+gh-pr-metrics --ai-bot-regex ""
 ```
 
 ### Authentication
@@ -44,25 +50,30 @@ Set `GITHUB_TOKEN` environment variable for private repositories or to avoid rat
 Example output:
 
 ```csv
-pr_number,created_at,ready_for_review_at,merged_at,closed_at,comments_total,comments_bot,change_requests_total,change_requests_unique,approvals,status,errors
-123,2024-01-15T10:30:00Z,2024-01-15T14:20:00Z,2024-01-16T09:00:00Z,2024-01-16T09:00:00Z,15,3,2,2,3,merged,
-124,2024-01-16T09:15:00Z,,,,8,1,0,0,1,open,
-125,2024-01-17T11:00:00Z,2024-01-18T08:30:00Z,,2024-01-19T12:00:00Z,22,5,4,3,2,closed,
+pr_number,title,author,created_at,ready_for_review_at,merged_at,closed_at,total_comment_count,non_ai_bot_comment_count,ai_bot_comment_count,non_ai_bot_login_names,ai_bot_login_names,changes_requested_count,unique_change_requesters,approval_count,status,url,errors
+123,"Fix bug",user1,2024-01-15T10:30:00Z,2024-01-15T14:20:00Z,2024-01-16T09:00:00Z,2024-01-16T09:00:00Z,15,2,1,"dependabot[bot],github-actions[bot]",cursor[bot],2,2,3,merged,https://github.com/owner/repo/pull/123,
+124,"Add feature",user2,2024-01-16T09:15:00Z,,,,8,1,0,sonarqubecloud[bot],,0,0,1,open,https://github.com/owner/repo/pull/124,
 ```
 
 ### Column Descriptions
 
 - `pr_number` - Pull request number
+- `title` - Pull request title
+- `author` - Pull request author username
 - `created_at` - ISO 8601 timestamp when PR was created
 - `ready_for_review_at` - ISO 8601 timestamp when PR was marked ready (empty for draft PRs)
 - `merged_at` - ISO 8601 timestamp when PR was merged (empty if not merged)
 - `closed_at` - ISO 8601 timestamp when PR was closed (empty if still open)
-- `comments_total` - Total comments (includes bot comments)
-- `comments_bot` - Bot comments only
-- `change_requests_total` - Total change requests submitted
-- `change_requests_unique` - Unique reviewers who requested changes
-- `approvals` - Current approval count (latest state per reviewer)
+- `total_comment_count` - Total comments (includes all bot and human comments)
+- `non_ai_bot_comment_count` - Non-AI bot comments only (excludes AI bots and humans)
+- `ai_bot_comment_count` - AI bot comments only (currently tracks cursor[bot])
+- `non_ai_bot_login_names` - Comma-separated list of non-AI bot logins that commented
+- `ai_bot_login_names` - Comma-separated list of AI bot logins that commented
+- `changes_requested_count` - Total change requests submitted
+- `unique_change_requesters` - Unique reviewers who requested changes
+- `approval_count` - Current approval count (latest state per reviewer)
 - `status` - One of: draft, open, closed, merged
+- `url` - Full URL to the pull request
 - `errors` - Error messages if data collection failed (usually empty)
 
 ## Contributing

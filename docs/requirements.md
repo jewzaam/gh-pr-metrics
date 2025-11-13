@@ -45,6 +45,12 @@ This document defines the functional and non-functional requirements for a GitHu
 - **FR1.3.2**: Write CSV to stdout by default
 - **FR1.3.3**: Accept optional output file path parameter
 
+#### FR1.5: Bot Classification
+- **FR1.5.1**: Accept `--ai-bot-regex` parameter to identify AI bots
+- **FR1.5.2**: Default regex pattern: `cursor\[bot\]`
+- **FR1.5.3**: Support standard regex syntax for pattern matching
+- **FR1.5.4**: Support empty/None pattern to disable AI bot detection (all bots treated as non-AI)
+
 #### FR1.4: Debug and Logging
 - **FR1.4.1**: Accept `--debug` flag to enable detailed logging for troubleshooting
 - **FR1.4.2**: Display progress indicators showing current processing status
@@ -65,13 +71,21 @@ This document defines the functional and non-functional requirements for a GitHu
   - Issue comments (comments on the PR itself)
   - Review comments (inline code comments)
   - All comment types regardless of author type
-- **FR2.2.4**: Count bot comments separately
-  - Identify bot comments based on user type
-  - Provide separate metric for bot comment count
-- **FR2.2.5**: Count total number of change requests
+- **FR2.2.4**: Count non-AI bot comments separately
+  - Identify bot comments based on user type (type == "Bot")
+  - Exclude AI bots from this count
+  - Provide separate metric for non-AI bot comment count
+  - Track non-AI bot login names (comma-separated list)
+- **FR2.2.5**: Count AI bot comments separately
+  - Identify AI bot comments using regex pattern
+  - Default pattern: `cursor\[bot\]`
+  - Pattern configurable via `--ai-bot-regex` CLI argument
+  - Provide separate metric for AI bot comment count
+  - Track AI bot login names (comma-separated list)
+- **FR2.2.6**: Count total number of change requests
   - Count all reviews with "CHANGES_REQUESTED" state
   - Include all requests regardless of reviewer uniqueness
-- **FR2.2.6**: Count unique reviewers who requested changes
+- **FR2.2.7**: Count unique reviewers who requested changes
   - Count distinct reviewers who have submitted change requests
 - **FR2.2.7**: Count number of approvals
   - Count reviews with "APPROVED" state
@@ -96,14 +110,17 @@ This document defines the functional and non-functional requirements for a GitHu
 - **FR3.2.3**: `author` - Pull request author username
 - **FR3.2.4**: `created_at` - ISO 8601 timestamp when PR was created
 - **FR3.2.5**: `ready_for_review_at` - ISO 8601 timestamp when PR was last marked ready
-- **FR3.2.6**: `total_comment_count` - Total number of all comments (includes bot comments)
-- **FR3.2.7**: `bot_comment_count` - Number of comments from bots
-- **FR3.2.8**: `changes_requested_count` - Total number of change requests
-- **FR3.2.9**: `unique_change_requesters` - Count of unique reviewers who requested changes
-- **FR3.2.10**: `approval_count` - Number of approvals
-- **FR3.2.11**: `status` - Current PR status
-- **FR3.2.12**: `url` - Full URL to the pull request
-- **FR3.2.13**: `errors` - Optional column with error messages if partial data was retrieved
+- **FR3.2.6**: `total_comment_count` - Total number of all comments (includes all bot and human comments)
+- **FR3.2.7**: `non_ai_bot_comment_count` - Number of comments from non-AI bots (excludes AI bots)
+- **FR3.2.8**: `ai_bot_comment_count` - Number of comments from AI bots only
+- **FR3.2.9**: `non_ai_bot_login_names` - Comma-separated list of non-AI bot logins that commented
+- **FR3.2.10**: `ai_bot_login_names` - Comma-separated list of AI bot logins that commented
+- **FR3.2.11**: `changes_requested_count` - Total number of change requests
+- **FR3.2.12**: `unique_change_requesters` - Count of unique reviewers who requested changes
+- **FR3.2.13**: `approval_count` - Number of approvals
+- **FR3.2.14**: `status` - Current PR status
+- **FR3.2.15**: `url` - Full URL to the pull request
+- **FR3.2.16**: `errors` - Optional column with error messages if partial data was retrieved
 
 ### FR4: Authentication
 

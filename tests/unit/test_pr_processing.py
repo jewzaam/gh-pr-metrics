@@ -153,9 +153,14 @@ class TestCommentCounting:
         requests_mock.get(pr["comments_url"], json=[])
         requests_mock.get(pr["review_comments_url"], json=[])
 
-        total, bot = gh_pr_metrics.count_comments(pr, "owner", "repo", None)
+        total, non_ai_bot, ai_bot, non_ai_bot_names, ai_bot_names = gh_pr_metrics.count_comments(
+            pr, "owner", "repo", None, "cursor\\[bot\\]"
+        )
         assert total == 0
-        assert bot == 0
+        assert non_ai_bot == 0
+        assert ai_bot == 0
+        assert non_ai_bot_names == ""
+        assert ai_bot_names == ""
 
     def test_count_comments_with_regular_comments(self, requests_mock):
         """Test counting regular comments."""
@@ -167,13 +172,23 @@ class TestCommentCounting:
 
         requests_mock.get(
             pr["comments_url"],
-            json=[{"user": {"type": "User"}}, {"user": {"type": "User"}}],
+            json=[
+                {"user": {"type": "User", "login": "user1"}},
+                {"user": {"type": "User", "login": "user2"}},
+            ],
         )
-        requests_mock.get(pr["review_comments_url"], json=[{"user": {"type": "User"}}])
+        requests_mock.get(
+            pr["review_comments_url"], json=[{"user": {"type": "User", "login": "user3"}}]
+        )
 
-        total, bot = gh_pr_metrics.count_comments(pr, "owner", "repo", None)
+        total, non_ai_bot, ai_bot, non_ai_bot_names, ai_bot_names = gh_pr_metrics.count_comments(
+            pr, "owner", "repo", None, "cursor\\[bot\\]"
+        )
         assert total == 3
-        assert bot == 0
+        assert non_ai_bot == 0
+        assert ai_bot == 0
+        assert non_ai_bot_names == ""
+        assert ai_bot_names == ""
 
     def test_count_comments_with_bot_comments(self, requests_mock):
         """Test counting bot comments separately."""
@@ -185,13 +200,83 @@ class TestCommentCounting:
 
         requests_mock.get(
             pr["comments_url"],
-            json=[{"user": {"type": "Bot"}}, {"user": {"type": "User"}}],
+            json=[
+                {"user": {"type": "Bot", "login": "github-actions[bot]"}},
+                {"user": {"type": "User", "login": "user1"}},
+            ],
         )
-        requests_mock.get(pr["review_comments_url"], json=[{"user": {"type": "Bot"}}])
+        requests_mock.get(
+            pr["review_comments_url"], json=[{"user": {"type": "Bot", "login": "dependabot[bot]"}}]
+        )
 
-        total, bot = gh_pr_metrics.count_comments(pr, "owner", "repo", None)
+        total, non_ai_bot, ai_bot, non_ai_bot_names, ai_bot_names = gh_pr_metrics.count_comments(
+            pr, "owner", "repo", None, "cursor\\[bot\\]"
+        )
         assert total == 3
-        assert bot == 2
+        assert non_ai_bot == 2
+        assert ai_bot == 0
+        assert non_ai_bot_names == "dependabot[bot],github-actions[bot]"
+        assert ai_bot_names == ""
+
+    def test_count_comments_with_ai_bot_comments(self, requests_mock):
+        """Test counting AI bot comments separately."""
+        pr = {
+            "number": 1,
+            "comments_url": "https://api.github.com/repos/owner/repo/issues/1/comments",
+            "review_comments_url": "https://api.github.com/repos/owner/repo/pulls/1/comments",
+        }
+
+        requests_mock.get(
+            pr["comments_url"],
+            json=[
+                {"user": {"type": "Bot", "login": "cursor[bot]"}},
+                {"user": {"type": "Bot", "login": "github-actions[bot]"}},
+                {"user": {"type": "User", "login": "user1"}},
+            ],
+        )
+        requests_mock.get(
+            pr["review_comments_url"], json=[{"user": {"type": "Bot", "login": "cursor[bot]"}}]
+        )
+
+        # Test with default CLI pattern
+        total, non_ai_bot, ai_bot, non_ai_bot_names, ai_bot_names = gh_pr_metrics.count_comments(
+            pr, "owner", "repo", None, "cursor\\[bot\\]"
+        )
+        assert total == 4
+        assert non_ai_bot == 1
+        assert ai_bot == 2
+        assert non_ai_bot_names == "github-actions[bot]"
+        assert ai_bot_names == "cursor[bot]"
+
+    def test_count_comments_with_none_ai_bot_pattern(self, requests_mock):
+        """Test that None ai_bot_pattern treats all bots as non-AI bots."""
+        pr = {
+            "number": 1,
+            "comments_url": "https://api.github.com/repos/owner/repo/issues/1/comments",
+            "review_comments_url": "https://api.github.com/repos/owner/repo/pulls/1/comments",
+        }
+
+        requests_mock.get(
+            pr["comments_url"],
+            json=[
+                {"user": {"type": "Bot", "login": "cursor[bot]"}},
+                {"user": {"type": "Bot", "login": "github-actions[bot]"}},
+                {"user": {"type": "User", "login": "user1"}},
+            ],
+        )
+        requests_mock.get(
+            pr["review_comments_url"], json=[{"user": {"type": "Bot", "login": "cursor[bot]"}}]
+        )
+
+        # Test with None pattern - all bots should be non-AI
+        total, non_ai_bot, ai_bot, non_ai_bot_names, ai_bot_names = gh_pr_metrics.count_comments(
+            pr, "owner", "repo", None, None
+        )
+        assert total == 4
+        assert non_ai_bot == 3  # All bots are non-AI when pattern is None
+        assert ai_bot == 0
+        assert non_ai_bot_names == "cursor[bot],github-actions[bot]"
+        assert ai_bot_names == ""
 
 
 class TestReviewMetrics:

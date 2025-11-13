@@ -64,6 +64,20 @@ class TestArgumentParsing:
             args = gh_pr_metrics.parse_arguments()
             assert args.workers == 4
 
+    def test_parse_arguments_ai_bot_regex_default(self):
+        """Test that ai-bot-regex has a default value."""
+        with mock.patch.object(sys, "argv", ["gh-pr-metrics"]):
+            args = gh_pr_metrics.parse_arguments()
+            assert args.ai_bot_regex == "cursor\\[bot\\]"
+
+    def test_parse_arguments_with_ai_bot_regex(self):
+        """Test parsing with custom ai-bot-regex."""
+        with mock.patch.object(
+            sys, "argv", ["gh-pr-metrics", "--ai-bot-regex", "copilot\\[bot\\]|cursor\\[bot\\]"]
+        ):
+            args = gh_pr_metrics.parse_arguments()
+            assert args.ai_bot_regex == "copilot\\[bot\\]|cursor\\[bot\\]"
+
 
 class TestLoggingSetup:
     """Test logging configuration."""

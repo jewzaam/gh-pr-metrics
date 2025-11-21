@@ -32,3 +32,163 @@ class TestMain:
         ):
             result = gh_pr_metrics.main()
             assert result == 0
+
+    def test_main_update_mode_requires_output(self):
+        """Test that update mode requires --output flag."""
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["gh-pr-metrics", "--owner", "testowner", "--repo", "testrepo", "--update"],
+        ):
+            with mock.patch(
+                "gh_pr_metrics.get_repo_from_git", return_value=("testowner", "testrepo")
+            ):
+                result = gh_pr_metrics.main()
+                assert result == 1
+
+    def test_main_update_mode_with_existing_state(self, requests_mock, tmp_path):
+        """Test update mode uses last update date from state file."""
+        state_file = tmp_path / "state.yaml"
+        output_file = tmp_path / "test.csv"
+
+        # Create initial CSV
+        output_file.write_text("pr_number,title\n")
+
+        # Create state with stored CSV path
+        state_file.write_text(
+            f"https://github.com/testowner/testrepo:\n"
+            f"  csv_file: {output_file}\n"
+            f"  timestamp: '2024-01-01T00:00:00'\n"
+        )
+
+        # Mock the GitHub API to return empty PRs list
+        requests_mock.get(
+            "https://api.github.com/repos/testowner/testrepo/pulls",
+            json=[],
+        )
+
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["gh-pr-metrics", "--owner", "testowner", "--repo", "testrepo", "--update"],
+        ):
+            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+                result = gh_pr_metrics.main()
+                assert result == 0
+
+    def test_main_update_mode_without_existing_state(self, tmp_path):
+        """Test update mode fails when no state exists."""
+        state_file = tmp_path / "state.yaml"
+
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["gh-pr-metrics", "--owner", "testowner", "--repo", "testrepo", "--update"],
+        ):
+            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+                result = gh_pr_metrics.main()
+                assert result == 1  # Should fail - no state
+
+    def test_main_update_all_no_tracked_repos(self, tmp_path):
+        """Test --update-all fails when no repos are tracked."""
+        state_file = tmp_path / "state.yaml"
+
+        with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all"]):
+            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+                result = gh_pr_metrics.main()
+                assert result == 1
+
+    def test_main_update_all_with_tracked_repos(self, requests_mock, tmp_path):
+        """Test --update-all processes all tracked repositories."""
+        state_file = tmp_path / "state.yaml"
+        csv_file1 = tmp_path / "repo1.csv"
+        csv_file2 = tmp_path / "repo2.csv"
+
+        # Create initial CSV files
+        csv_file1.write_text("pr_number,title\n")
+        csv_file2.write_text("pr_number,title\n")
+
+        # Create state with two repos
+        state_file.write_text(
+            f"https://github.com/owner1/repo1:\n"
+            f"  csv_file: {csv_file1}\n"
+            f"  timestamp: '2024-01-01T00:00:00Z'\n"
+            f"https://github.com/owner2/repo2:\n"
+            f"  csv_file: {csv_file2}\n"
+            f"  timestamp: '2024-01-02T00:00:00Z'\n"
+        )
+
+        # Mock GitHub API for both repos
+        requests_mock.get(
+            "https://api.github.com/repos/owner1/repo1/pulls",
+            json=[],
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/owner2/repo2/pulls",
+            json=[],
+        )
+
+        with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all"]):
+            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+                result = gh_pr_metrics.main()
+                assert result == 0
+
+    def test_main_update_all_with_partial_failure(self, requests_mock, tmp_path):
+        """Test --update-all continues after individual repo failure."""
+        state_file = tmp_path / "state.yaml"
+        csv_file1 = tmp_path / "repo1.csv"
+        csv_file2 = tmp_path / "repo2.csv"
+
+        # Create initial CSV files
+        csv_file1.write_text("pr_number,title\n")
+        csv_file2.write_text("pr_number,title\n")
+
+        # Create state with two repos
+        state_file.write_text(
+            f"https://github.com/owner1/repo1:\n"
+            f"  csv_file: {csv_file1}\n"
+            f"  timestamp: '2024-01-01T00:00:00Z'\n"
+            f"https://github.com/owner2/repo2:\n"
+            f"  csv_file: {csv_file2}\n"
+            f"  timestamp: '2024-01-02T00:00:00Z'\n"
+        )
+
+        # Mock GitHub API - first fails, second succeeds
+        requests_mock.get(
+            "https://api.github.com/repos/owner1/repo1/pulls",
+            status_code=404,
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/owner2/repo2/pulls",
+            json=[],
+        )
+
+        with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all"]):
+            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+                result = gh_pr_metrics.main()
+                assert result == 1  # Returns failure due to partial failure
+
+    def test_main_update_all_skips_repo_without_csv(self, tmp_path):
+        """Test --update-all skips repos without CSV file in state."""
+        state_file = tmp_path / "state.yaml"
+        csv_file = tmp_path / "repo.csv"
+
+        # Create initial CSV file for one repo
+        csv_file.write_text("pr_number,title\n")
+
+        # Create state with one repo missing csv_file
+        state_file.write_text(
+            "https://github.com/owner1/repo1:\n"
+            "  timestamp: '2024-01-01T00:00:00Z'\n"
+            f"https://github.com/owner2/repo2:\n"
+            f"  csv_file: {csv_file}\n"
+            f"  timestamp: '2024-01-02T00:00:00Z'\n"
+        )
+
+        with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all"]):
+            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+                with mock.patch("gh_pr_metrics.process_repository", return_value=0) as mock_process:
+                    result = gh_pr_metrics.main()
+                    # Should only process one repo
+                    assert mock_process.call_count == 1
+                    assert result == 0

@@ -14,8 +14,11 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
+import yaml
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 try:
@@ -36,6 +39,8 @@ __version__ = "0.1.0"
 GITHUB_API_BASE = "https://api.github.com"
 DEFAULT_DAYS_BACK = 365
 DEFAULT_WORKERS = 4
+STATE_FILE = Path.home() / ".gh-pr-metrics-state.yaml"
+PR_NUMBER_FIELD = "pr_number"
 
 
 class GitHubAPIError(Exception):
@@ -52,6 +57,143 @@ def setup_logging(debug: bool = False) -> None:
         format="%(asctime)s - %(levelname)s - %(message)s",
         stream=sys.stderr,
     )
+
+
+def load_state_file() -> Dict[str, str]:
+    """Load state file containing last update dates per repo."""
+    if not STATE_FILE.exists():
+        return {}
+
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+            return data
+    except Exception as e:
+        logging.warning("Failed to load state file %s: %s", STATE_FILE, e)
+        return {}
+
+
+def save_state_file(state: Dict[str, str]) -> None:
+    """Save state file with last update dates per repo."""
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            yaml.safe_dump(state, f, default_flow_style=False, sort_keys=True)
+
+        logging.debug("Saved state file to %s", STATE_FILE)
+    except Exception as e:
+        logging.error("Failed to save state file %s: %s", STATE_FILE, e)
+        raise
+
+
+def get_repo_remote_url(owner: str, repo: str) -> str:
+    """
+    Get repository remote URL key for state tracking.
+    Uses format: https://github.com/owner/repo
+    Future-proof for GitLab, GitHub Enterprise, etc.
+    """
+    return f"https://github.com/{owner}/{repo}"
+
+
+def get_repo_state(owner: str, repo: str) -> Optional[Dict[str, Any]]:
+    """
+    Get state for a repository (timestamp and csv_file).
+    Returns dict with 'timestamp' and 'csv_file' keys, or None if not found.
+    Raises ValueError if state is malformed with clear error message.
+    """
+    state = load_state_file()
+    repo_key = get_repo_remote_url(owner, repo)
+
+    if repo_key not in state:
+        return None
+
+    entry = state[repo_key]
+
+    if not isinstance(entry, dict):
+        raise ValueError(
+            f"Invalid state format for {repo_key} in state file. "
+            f"Expected dict with 'timestamp' and 'csv_file', got {type(entry).__name__}"
+        )
+
+    timestamp_str = entry.get("timestamp", "")
+    csv_file = entry.get("csv_file")
+
+    if not timestamp_str:
+        raise ValueError(
+            f"Missing or empty 'timestamp' field for {repo_key} in state file. "
+            f"State file location: {STATE_FILE}"
+        )
+
+    if not csv_file:
+        raise ValueError(
+            f"Missing or empty 'csv_file' field for {repo_key} in state file. "
+            f"State file location: {STATE_FILE}"
+        )
+
+    try:
+        timestamp = parse_timestamp(timestamp_str)
+    except ValueError as e:
+        raise ValueError(
+            f"Invalid timestamp for {repo_key} in state file: {e}. "
+            f"State file location: {STATE_FILE}"
+        ) from e
+
+    return {"timestamp": timestamp, "csv_file": csv_file}
+
+
+def get_last_update_date(owner: str, repo: str) -> Optional[datetime]:
+    """Get last update date for a repository from state file."""
+    repo_state = get_repo_state(owner, repo)
+    return repo_state["timestamp"] if repo_state else None
+
+
+def get_all_tracked_repos() -> List[Dict[str, Any]]:
+    """
+    Get all tracked repositories from state file.
+    Returns list of dicts with 'url', 'owner', 'repo', 'timestamp', 'csv_file'.
+    """
+    state = load_state_file()
+    repos = []
+
+    for repo_url, entry in state.items():
+        # Parse URL to get owner/repo
+        # Format: https://github.com/owner/repo
+        try:
+            parts = repo_url.rstrip("/").split("/")
+            if len(parts) >= 2:
+                owner = parts[-2]
+                repo = parts[-1]
+
+                if isinstance(entry, dict):
+                    timestamp = parse_timestamp(entry.get("timestamp", ""))
+                    csv_file = entry.get("csv_file")
+                else:
+                    logging.warning("Skipping %s: invalid state format", repo_url)
+                    continue
+
+                repos.append(
+                    {
+                        "url": repo_url,
+                        "owner": owner,
+                        "repo": repo,
+                        "timestamp": timestamp,
+                        "csv_file": csv_file,
+                    }
+                )
+        except Exception as e:
+            logging.warning("Failed to parse state entry for %s: %s", repo_url, e)
+            continue
+
+    return repos
+
+
+def update_state_file(owner: str, repo: str, timestamp: datetime, csv_file: str) -> None:
+    """Update state file with new last update date and csv file for a repository."""
+    state = load_state_file()
+    repo_key = get_repo_remote_url(owner, repo)
+    # Store as UTC timestamp without timezone component to avoid confusion
+    utc_timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
+    state[repo_key] = {"timestamp": utc_timestamp.isoformat(), "csv_file": csv_file}
+    save_state_file(state)
 
 
 def get_github_token() -> Optional[str]:
@@ -96,7 +238,14 @@ def get_repo_from_git() -> tuple[Optional[str], Optional[str]]:
 
 
 def parse_timestamp(timestamp_str: str) -> datetime:
-    """Parse various timestamp formats to datetime (always returns timezone-aware)."""
+    """
+    Parse various timestamp formats to datetime (always returns timezone-aware).
+
+    Raises ValueError with clear message if timestamp cannot be parsed.
+    """
+    if not timestamp_str or not timestamp_str.strip():
+        raise ValueError("Timestamp string is empty or None")
+
     try:
         # Try Unix timestamp first
         dt = datetime.fromtimestamp(float(timestamp_str))
@@ -105,12 +254,15 @@ def parse_timestamp(timestamp_str: str) -> datetime:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
     except (ValueError, OverflowError):
-        # Try ISO 8601 / RFC 3339
-        dt = date_parser.parse(timestamp_str)
-        # Make timezone-aware if naive
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
+        try:
+            # Try ISO 8601 / RFC 3339
+            dt = date_parser.parse(timestamp_str)
+            # Make timezone-aware if naive
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"Invalid timestamp format: {timestamp_str}") from e
 
 
 def check_rate_limit(token: Optional[str] = None) -> None:
@@ -413,7 +565,7 @@ def process_pr(
 
     errors = []
     metrics: Dict[str, Any] = {
-        "pr_number": pr_number,
+        PR_NUMBER_FIELD: pr_number,
         "title": pr["title"],
         "author": pr["user"]["login"] if pr.get("user") else "",
         "created_at": pr["created_at"],
@@ -473,14 +625,45 @@ def process_pr(
     return metrics
 
 
-def write_csv_output(metrics: List[Dict[str, Any]], output_file: Optional[str]) -> None:
-    """Write metrics to CSV file or stdout."""
+def read_existing_csv(csv_file: str) -> Dict[int, Dict[str, Any]]:
+    """
+    Read existing CSV file and return dict keyed by PR number.
+    Returns empty dict if file doesn't exist or can't be read.
+    """
+    if not os.path.exists(csv_file):
+        return {}
+
+    try:
+        existing_data = {}
+        with open(csv_file, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                # Key by PR number for O(1) lookups
+                pr_number = int(row[PR_NUMBER_FIELD])
+                existing_data[pr_number] = row
+
+        logging.info("Loaded %d existing PRs from %s", len(existing_data), csv_file)
+        return existing_data
+    except Exception as e:
+        logging.warning("Failed to read existing CSV %s: %s", csv_file, e)
+        return {}
+
+
+def write_csv_output(
+    metrics: List[Dict[str, Any]], output_file: Optional[str], merge_mode: bool = False
+) -> None:
+    """
+    Write metrics to CSV file or stdout.
+
+    If merge_mode is True and output_file exists, existing PR data is loaded,
+    updated with new metrics, and written back (replacing existing PRs and adding new ones).
+    """
     if not metrics:
         logging.warning("No pull requests to output")
         return
 
     fieldnames = [
-        "pr_number",
+        PR_NUMBER_FIELD,
         "title",
         "author",
         "created_at",
@@ -500,16 +683,47 @@ def write_csv_output(metrics: List[Dict[str, Any]], output_file: Optional[str]) 
         "errors",
     ]
 
+    # Merge with existing data if requested
+    if merge_mode and output_file:
+        existing_data = read_existing_csv(output_file)
+
+        # Update existing data with new metrics
+        for metric in metrics:
+            pr_number = metric[PR_NUMBER_FIELD]
+            existing_data[pr_number] = metric
+
+        # Convert back to list (order doesn't matter per requirements)
+        all_metrics = list(existing_data.values())
+        logging.info("Merged data: %d total PRs (%d new/updated)", len(all_metrics), len(metrics))
+    else:
+        all_metrics = metrics
+
     if output_file:
-        logging.info("Writing output to %s", output_file)
-        with open(output_file, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(metrics)
+        # Write to temp file first, then atomically rename
+        output_path = Path(output_file)
+        temp_fd, temp_path = tempfile.mkstemp(
+            dir=output_path.parent if output_path.parent.exists() else tempfile.gettempdir(),
+            prefix=".tmp_pr_metrics_",
+            suffix=".csv",
+        )
+
+        try:
+            with os.fdopen(temp_fd, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(all_metrics)
+
+            # Atomic rename
+            os.rename(temp_path, output_file)
+            logging.info("Writing output to %s", output_file)
+        except Exception as e:
+            # Keep temp file for debugging, just log its location
+            logging.error("Failed to write CSV output. Temp file retained at: %s", temp_path)
+            raise e
     else:
         writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(metrics)
+        writer.writerows(all_metrics)
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -528,8 +742,14 @@ Examples:
   # Custom time range
   gh-pr-metrics --start 2024-01-01 --end 2024-12-31
 
-  # Output to file
+  # Output to file (stores path in state for future updates)
   gh-pr-metrics --output metrics.csv
+
+  # Update specific repo (uses stored CSV path from state)
+  gh-pr-metrics --owner microsoft --repo vscode --update
+
+  # Update all tracked repositories
+  gh-pr-metrics --update
 
 Environment Variables:
   GITHUB_TOKEN    GitHub personal access token for authentication
@@ -547,6 +767,18 @@ Environment Variables:
         help="End timestamp (ISO 8601, RFC 3339, or Unix timestamp). Default: now",
     )
     parser.add_argument("--output", "-o", help="Output file path (default: stdout)")
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="Update mode: fetch only PRs since last update and merge with existing CSV. "
+        "Requires --owner and --repo. Uses CSV path stored in state file. "
+        "Cannot be used with --output (uses stored path).",
+    )
+    parser.add_argument(
+        "--update-all",
+        action="store_true",
+        help="Update all tracked repositories. Cannot be used with --owner/--repo or --output.",
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(
         "--workers",
@@ -567,6 +799,85 @@ Environment Variables:
     return parser.parse_args()
 
 
+def process_repository(
+    owner: str,
+    repo: str,
+    output_file: str,
+    start_date: datetime,
+    end_date: datetime,
+    token: Optional[str],
+    workers: int,
+    ai_bot_regex: str,
+    merge_mode: bool = False,
+) -> int:
+    """
+    Process a single repository and generate/update metrics CSV.
+    Returns 0 on success, 1 on error.
+    """
+    repo_ctx = f"{owner}/{repo}"
+
+    logging.info("[%s] Starting processing", repo_ctx)
+    logging.info(
+        "[%s] Date range: %s to %s", repo_ctx, start_date.isoformat(), end_date.isoformat()
+    )
+
+    try:
+        # Fetch PRs
+        prs = fetch_pull_requests(owner, repo, start_date, end_date, token)
+
+        if not prs:
+            logging.info("[%s] No pull requests found in the specified date range", repo_ctx)
+            return 0
+
+        # Process each PR with thread pool
+        metrics = []
+        total_prs = len(prs)
+        completed = 0
+
+        logging.info("[%s] Processing %d PRs with %d workers", repo_ctx, total_prs, workers)
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            # Submit all PR processing tasks
+            future_to_pr = {
+                executor.submit(process_pr, pr, owner, repo, token, ai_bot_regex): pr for pr in prs
+            }
+
+            # Collect results as they complete
+            for future in as_completed(future_to_pr):
+                pr = future_to_pr[future]
+                completed += 1
+                try:
+                    pr_metrics = future.result()
+                    metrics.append(pr_metrics)
+                    logging.info(
+                        "[%s] Completed PR %d/%d: #%d",
+                        repo_ctx,
+                        completed,
+                        total_prs,
+                        pr["number"],
+                    )
+                except Exception as e:
+                    logging.error("[%s] Failed to process PR #%d: %s", repo_ctx, pr["number"], e)
+                    # Continue processing other PRs
+
+        # Write output
+        write_csv_output(metrics, output_file, merge_mode=merge_mode)
+
+        # Update state file with timestamp and csv path
+        update_state_file(owner, repo, end_date, output_file)
+        logging.info("[%s] Updated state file with timestamp: %s", repo_ctx, end_date.isoformat())
+
+        logging.info("[%s] Successfully processed %d pull requests", repo_ctx, len(metrics))
+        return 0
+
+    except GitHubAPIError as e:
+        logging.error("[%s] GitHub API error: %s", repo_ctx, e)
+        return 1
+    except Exception as e:
+        logging.error("[%s] Unexpected error: %s", repo_ctx, e, exc_info=True)
+        return 1
+
+
 def main() -> int:
     """Main entry point."""
     args = parse_arguments()
@@ -574,6 +885,104 @@ def main() -> int:
 
     logging.info("GitHub PR Metrics Tool v%s", __version__)
     logging.debug("Arguments: %s", args)
+
+    # Validate argument combinations
+    if args.update and args.output:
+        logging.error("--update and --output cannot be used together (update uses stored CSV path)")
+        return 1
+
+    if args.update and (args.start or args.end):
+        logging.error(
+            "--update cannot be used with --start or --end (uses last update date from state)"
+        )
+        return 1
+
+    if args.update_all and args.output:
+        logging.error("--update-all and --output cannot be used together (uses stored CSV paths)")
+        return 1
+
+    if args.update_all and (args.start or args.end):
+        logging.error(
+            "--update-all cannot be used with --start or --end (uses last update dates from state)"
+        )
+        return 1
+
+    if args.update_all and (args.owner or args.repo):
+        logging.error("--update-all cannot be used with --owner or --repo")
+        return 1
+
+    if args.update and args.update_all:
+        logging.error("--update and --update-all cannot be used together")
+        return 1
+
+    # Get GitHub token
+    token = get_github_token()
+    if not token:
+        logging.warning(
+            "No GITHUB_TOKEN found. API rate limits will be restrictive "
+            "for unauthenticated requests."
+        )
+        # Force single worker to avoid hitting rate limits too quickly
+        workers = 1 if args.workers > 1 else args.workers
+        if args.workers > 1:
+            logging.warning("Forcing --workers=1 due to missing GITHUB_TOKEN")
+    else:
+        workers = args.workers
+
+    # Check and display rate limit status
+    check_rate_limit(token)
+
+    # Handle update-all mode
+    if args.update_all:
+        try:
+            tracked_repos = get_all_tracked_repos()
+        except Exception as e:
+            logging.error("Failed to load state file: %s", e)
+            return 1
+
+        if not tracked_repos:
+            logging.error(
+                "No tracked repositories found in state file. "
+                "Run without --update-all first to track repositories."
+            )
+            return 1
+
+        logging.info("Updating %d tracked repositories", len(tracked_repos))
+
+        failed = 0
+        for repo_info in tracked_repos:
+            owner = repo_info["owner"]
+            repo = repo_info["repo"]
+            csv_file = repo_info["csv_file"]
+            last_update = repo_info["timestamp"]
+
+            if not csv_file:
+                logging.warning("Skipping %s/%s: no CSV file stored in state", owner, repo)
+                continue
+
+            logging.info("=" * 80)
+
+            start_date = last_update
+            end_date = datetime.now(timezone.utc)
+
+            result = process_repository(
+                owner,
+                repo,
+                csv_file,
+                start_date,
+                end_date,
+                token,
+                workers,
+                args.ai_bot_regex,
+                merge_mode=True,
+            )
+
+            if result != 0:
+                failed += 1
+
+        logging.info("=" * 80)
+        logging.info("Completed: %d successful, %d failed", len(tracked_repos) - failed, failed)
+        return 1 if failed > 0 else 0
 
     # Get repository info
     owner = args.owner
@@ -591,9 +1000,50 @@ def main() -> int:
         )
         return 1
 
-    logging.info("Repository: %s/%s", owner, repo)
+    # Handle update mode for specific repo
+    if args.update:
+        if not owner or not repo:
+            logging.error("--update requires --owner and --repo to be specified")
+            return 1
 
-    # Get time range
+        try:
+            repo_state = get_repo_state(owner, repo)
+        except ValueError as e:
+            logging.error("State file validation failed: %s", e)
+            return 1
+
+        if not repo_state:
+            logging.error(
+                "Repository %s/%s not found in state file. "
+                "Run without --update first to track this repository.",
+                owner,
+                repo,
+            )
+            return 1
+
+        csv_file = repo_state["csv_file"]
+        start_date = repo_state["timestamp"]
+        end_date = datetime.now(timezone.utc)
+
+        return process_repository(
+            owner,
+            repo,
+            csv_file,
+            start_date,
+            end_date,
+            token,
+            workers,
+            args.ai_bot_regex,
+            merge_mode=True,
+        )
+
+    # Regular mode (non-update)
+    if not args.output:
+        output_file = None  # stdout
+    else:
+        output_file = args.output
+
+    # Get time range from args or defaults
     end_date = parse_timestamp(args.end) if args.end else datetime.now(timezone.utc)
     start_date = (
         parse_timestamp(args.start) if args.start else end_date - timedelta(days=DEFAULT_DAYS_BACK)
@@ -603,73 +1053,52 @@ def main() -> int:
         logging.error("Start date must be before end date")
         return 1
 
-    logging.info("Date range: %s to %s", start_date.isoformat(), end_date.isoformat())
-
-    # Get GitHub token
-    token = get_github_token()
-    if not token:
-        logging.warning(
-            "No GITHUB_TOKEN found. API rate limits will be restrictive "
-            "for unauthenticated requests."
+    # Only store state if output_file is specified (not stdout)
+    if output_file:
+        return process_repository(
+            owner, repo, output_file, start_date, end_date, token, workers, args.ai_bot_regex
         )
-        # Force single worker to avoid hitting rate limits too quickly
-        if args.workers > 1:
-            logging.warning("Forcing --workers=1 due to missing GITHUB_TOKEN")
-            workers = 1
-        else:
-            workers = args.workers
     else:
-        workers = args.workers
+        # stdout mode - don't store state
+        try:
+            prs = fetch_pull_requests(owner, repo, start_date, end_date, token)
 
-    # Check and display rate limit status
-    check_rate_limit(token)
+            if not prs:
+                logging.warning("No pull requests found in the specified date range")
+                return 0
 
-    try:
-        # Fetch PRs
-        prs = fetch_pull_requests(owner, repo, start_date, end_date, token)
+            metrics = []
+            total_prs = len(prs)
+            completed = 0
 
-        if not prs:
-            logging.warning("No pull requests found in the specified date range")
+            logging.info("Processing %d PRs with %d workers", total_prs, workers)
+
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                future_to_pr = {
+                    executor.submit(process_pr, pr, owner, repo, token, args.ai_bot_regex): pr
+                    for pr in prs
+                }
+
+                for future in as_completed(future_to_pr):
+                    pr = future_to_pr[future]
+                    completed += 1
+                    try:
+                        pr_metrics = future.result()
+                        metrics.append(pr_metrics)
+                        logging.info("Completed PR %d/%d: #%d", completed, total_prs, pr["number"])
+                    except Exception as e:
+                        logging.error("Failed to process PR #%d: %s", pr["number"], e)
+
+            write_csv_output(metrics, None, merge_mode=False)
+            logging.info("Successfully processed %d pull requests", len(metrics))
             return 0
 
-        # Process each PR with thread pool
-        metrics = []
-        total_prs = len(prs)
-        completed = 0
-
-        logging.info("Processing %d PRs with %d workers", total_prs, workers)
-
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            # Submit all PR processing tasks
-            future_to_pr = {
-                executor.submit(process_pr, pr, owner, repo, token, args.ai_bot_regex): pr
-                for pr in prs
-            }
-
-            # Collect results as they complete
-            for future in as_completed(future_to_pr):
-                pr = future_to_pr[future]
-                completed += 1
-                try:
-                    pr_metrics = future.result()
-                    metrics.append(pr_metrics)
-                    logging.info("Completed PR %d/%d: #%d", completed, total_prs, pr["number"])
-                except Exception as e:
-                    logging.error("Failed to process PR #%d: %s", pr["number"], e)
-                    # Continue processing other PRs
-
-        # Write output
-        write_csv_output(metrics, args.output)
-
-        logging.info("Successfully processed %d pull requests", len(metrics))
-        return 0
-
-    except GitHubAPIError as e:
-        logging.error("GitHub API error: %s", e)
-        return 1
-    except Exception as e:
-        logging.error("Unexpected error: %s", e, exc_info=args.debug)
-        return 1
+        except GitHubAPIError as e:
+            logging.error("GitHub API error: %s", e)
+            return 1
+        except Exception as e:
+            logging.error("Unexpected error: %s", e, exc_info=args.debug)
+            return 1
 
 
 if __name__ == "__main__":

@@ -120,3 +120,104 @@ class TestGitHubAPIClient:
 
         # Should not raise - should handle gracefully
         gh_pr_metrics.check_rate_limit(token="test_token")
+
+
+class TestFetchPRs:
+    """Test PR fetching with pagination logic."""
+
+    def test_fetch_prs_stops_at_start_date(self, requests_mock):
+        """Test that fetch_pull_requests stops when PRs are before start date."""
+        from datetime import datetime, timezone, timedelta
+
+        now = datetime.now(timezone.utc)
+        start_date = now - timedelta(days=7)
+        end_date = now
+
+        # Mock PRs - some in range, some before start_date
+        prs_page1 = [
+            {"number": 3, "created_at": (now - timedelta(days=2)).isoformat()},
+            {"number": 2, "created_at": (now - timedelta(days=5)).isoformat()},
+        ]
+        prs_page2 = [
+            {"number": 1, "created_at": (now - timedelta(days=10)).isoformat()},  # Before start
+        ]
+
+        url_base = "https://api.github.com/repos/owner/repo/pulls"
+        requests_mock.get(
+            f"{url_base}?state=all&sort=created&direction=desc&per_page=100&page=1",
+            json=prs_page1,
+        )
+        requests_mock.get(
+            f"{url_base}?state=all&sort=created&direction=desc&per_page=100&page=2",
+            json=prs_page2,
+        )
+
+        result = gh_pr_metrics.fetch_pull_requests("owner", "repo", start_date, end_date, None)
+
+        # Should only get the 2 PRs in range, and stop early
+        assert len(result) == 2
+        assert result[0]["number"] == 3
+        assert result[1]["number"] == 2
+
+    def test_fetch_prs_stops_at_per_page_limit(self, requests_mock):
+        """Test that fetch_pull_requests stops when fewer results than per_page returned."""
+        from datetime import datetime, timezone, timedelta
+
+        now = datetime.now(timezone.utc)
+        start_date = now - timedelta(days=365)
+        end_date = now
+
+        # Mock PRs - single page with only 50 results (less than 100)
+        prs = [
+            {"number": i, "created_at": (now - timedelta(days=i)).isoformat()} for i in range(1, 51)
+        ]
+
+        url_base = "https://api.github.com/repos/owner/repo/pulls"
+        requests_mock.get(
+            f"{url_base}?state=all&sort=created&direction=desc&per_page=100&page=1",
+            json=prs,
+        )
+
+        result = gh_pr_metrics.fetch_pull_requests("owner", "repo", start_date, end_date, None)
+
+        # Should get all 50 PRs and stop (no page 2 request)
+        assert len(result) == 50
+        assert len(requests_mock.request_history) == 1  # Only one request
+
+    def test_fetch_prs_multiple_pages_in_range(self, requests_mock):
+        """Test that fetch_pull_requests handles multiple pages of results."""
+        from datetime import datetime, timezone, timedelta
+
+        now = datetime.now(timezone.utc)
+        start_date = now - timedelta(days=365)
+        end_date = now
+
+        # Mock multiple pages of PRs all in range
+        prs_page1 = [
+            {"number": i + 100, "created_at": (now - timedelta(days=i)).isoformat()}
+            for i in range(100)
+        ]
+        prs_page2 = [
+            {"number": i, "created_at": (now - timedelta(days=i + 100)).isoformat()}
+            for i in range(100)
+        ]
+        prs_page3 = []  # Empty page signals end
+
+        url_base = "https://api.github.com/repos/owner/repo/pulls"
+        requests_mock.get(
+            f"{url_base}?state=all&sort=created&direction=desc&per_page=100&page=1",
+            json=prs_page1,
+        )
+        requests_mock.get(
+            f"{url_base}?state=all&sort=created&direction=desc&per_page=100&page=2",
+            json=prs_page2,
+        )
+        requests_mock.get(
+            f"{url_base}?state=all&sort=created&direction=desc&per_page=100&page=3",
+            json=prs_page3,
+        )
+
+        result = gh_pr_metrics.fetch_pull_requests("owner", "repo", start_date, end_date, None)
+
+        # Should get all PRs from both pages
+        assert len(result) == 200

@@ -45,3 +45,5 @@ env/
 .DS_Store
 Thumbs.db
 
+# Local data (csv)
+data/

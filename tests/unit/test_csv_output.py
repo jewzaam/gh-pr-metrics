@@ -158,3 +158,152 @@ class TestCSVOutput:
             assert len(rows) == 1
             assert rows[0]["merged_at"] == "2024-01-05T12:00:00Z"
             assert rows[0]["closed_at"] == "2024-01-05T12:00:00Z"
+
+    def test_read_existing_csv(self, tmp_path):
+        """Test reading existing CSV file."""
+        # Create a CSV file
+        csv_file = tmp_path / "existing.csv"
+        with open(csv_file, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["pr_number", "title", "status"])
+            writer.writeheader()
+            writer.writerow({"pr_number": "1", "title": "PR 1", "status": "open"})
+            writer.writerow({"pr_number": "2", "title": "PR 2", "status": "merged"})
+
+        # Read it back
+        data = gh_pr_metrics.read_existing_csv(str(csv_file))
+        assert len(data) == 2
+        assert 1 in data
+        assert 2 in data
+        assert data[1]["title"] == "PR 1"
+        assert data[2]["title"] == "PR 2"
+
+    def test_read_existing_csv_nonexistent(self, tmp_path):
+        """Test reading non-existent CSV returns empty dict."""
+        csv_file = tmp_path / "nonexistent.csv"
+        data = gh_pr_metrics.read_existing_csv(str(csv_file))
+        assert data == {}
+
+    def test_write_csv_merge_mode_add_new(self, tmp_path):
+        """Test merge mode adds new PRs to existing CSV."""
+        csv_file = tmp_path / "test.csv"
+
+        # Create initial CSV with PR 1
+        initial_metrics = [
+            {
+                "pr_number": 1,
+                "title": "Original PR",
+                "author": "user1",
+                "created_at": "2024-01-01T00:00:00Z",
+                "ready_for_review_at": "2024-01-01T00:00:00Z",
+                "merged_at": "",
+                "closed_at": "",
+                "total_comment_count": 0,
+                "non_ai_bot_comment_count": 0,
+                "ai_bot_comment_count": 0,
+                "non_ai_bot_login_names": "",
+                "ai_bot_login_names": "",
+                "changes_requested_count": 0,
+                "unique_change_requesters": 0,
+                "approval_count": 0,
+                "status": "open",
+                "url": "https://github.com/owner/repo/pull/1",
+                "errors": "",
+            }
+        ]
+        gh_pr_metrics.write_csv_output(initial_metrics, str(csv_file))
+
+        # Add PR 2 in merge mode
+        new_metrics = [
+            {
+                "pr_number": 2,
+                "title": "New PR",
+                "author": "user2",
+                "created_at": "2024-01-02T00:00:00Z",
+                "ready_for_review_at": "2024-01-02T00:00:00Z",
+                "merged_at": "",
+                "closed_at": "",
+                "total_comment_count": 0,
+                "non_ai_bot_comment_count": 0,
+                "ai_bot_comment_count": 0,
+                "non_ai_bot_login_names": "",
+                "ai_bot_login_names": "",
+                "changes_requested_count": 0,
+                "unique_change_requesters": 0,
+                "approval_count": 0,
+                "status": "open",
+                "url": "https://github.com/owner/repo/pull/2",
+                "errors": "",
+            }
+        ]
+        gh_pr_metrics.write_csv_output(new_metrics, str(csv_file), merge_mode=True)
+
+        # Verify both PRs are in the file
+        with open(csv_file, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            assert len(rows) == 2
+            pr_numbers = {int(row["pr_number"]) for row in rows}
+            assert pr_numbers == {1, 2}
+
+    def test_write_csv_merge_mode_update_existing(self, tmp_path):
+        """Test merge mode updates existing PR in CSV."""
+        csv_file = tmp_path / "test.csv"
+
+        # Create initial CSV with PR 1 (open)
+        initial_metrics = [
+            {
+                "pr_number": 1,
+                "title": "Original PR",
+                "author": "user1",
+                "created_at": "2024-01-01T00:00:00Z",
+                "ready_for_review_at": "2024-01-01T00:00:00Z",
+                "merged_at": "",
+                "closed_at": "",
+                "total_comment_count": 0,
+                "non_ai_bot_comment_count": 0,
+                "ai_bot_comment_count": 0,
+                "non_ai_bot_login_names": "",
+                "ai_bot_login_names": "",
+                "changes_requested_count": 0,
+                "unique_change_requesters": 0,
+                "approval_count": 0,
+                "status": "open",
+                "url": "https://github.com/owner/repo/pull/1",
+                "errors": "",
+            }
+        ]
+        gh_pr_metrics.write_csv_output(initial_metrics, str(csv_file))
+
+        # Update PR 1 (now merged) in merge mode
+        updated_metrics = [
+            {
+                "pr_number": 1,
+                "title": "Original PR",
+                "author": "user1",
+                "created_at": "2024-01-01T00:00:00Z",
+                "ready_for_review_at": "2024-01-01T00:00:00Z",
+                "merged_at": "2024-01-03T00:00:00Z",
+                "closed_at": "2024-01-03T00:00:00Z",
+                "total_comment_count": 5,
+                "non_ai_bot_comment_count": 3,
+                "ai_bot_comment_count": 2,
+                "non_ai_bot_login_names": "",
+                "ai_bot_login_names": "cursor[bot]",
+                "changes_requested_count": 1,
+                "unique_change_requesters": 1,
+                "approval_count": 2,
+                "status": "merged",
+                "url": "https://github.com/owner/repo/pull/1",
+                "errors": "",
+            }
+        ]
+        gh_pr_metrics.write_csv_output(updated_metrics, str(csv_file), merge_mode=True)
+
+        # Verify PR 1 is updated
+        with open(csv_file, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            assert len(rows) == 1
+            assert rows[0]["status"] == "merged"
+            assert rows[0]["merged_at"] == "2024-01-03T00:00:00Z"
+            assert rows[0]["total_comment_count"] == "5"

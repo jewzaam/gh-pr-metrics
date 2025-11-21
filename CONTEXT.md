@@ -10,10 +10,12 @@ This project implements a command-line tool that generates CSV reports containin
 
 1. **Automated PR Metrics Collection**: Fetches comprehensive data about pull requests including creation time, review readiness, comments, reviews, and current status
 2. **Flexible Time Range**: Analyze PRs from any time period (default: last 365 days)
-3. **CSV Output**: RFC 4180 compliant, UTF-8 encoded, Excel-compatible CSV format
-4. **Smart Defaults**: Works with minimal configuration by detecting repository information from local git config
-5. **Bot Comment Detection**: Separately tracks bot comments vs. human comments
-6. **Unique Reviewer Tracking**: Counts unique reviewers who requested changes
+3. **Differential Updates**: Update existing CSV files by fetching only new PRs since last update, avoiding redundant API calls and throttling
+4. **CSV Output**: RFC 4180 compliant, UTF-8 encoded, Excel-compatible CSV format
+5. **Smart Defaults**: Works with minimal configuration by detecting repository information from local git config
+6. **Bot Comment Detection**: Separately tracks bot comments vs. human comments
+7. **Unique Reviewer Tracking**: Counts unique reviewers who requested changes
+8. **State Tracking**: Automatically tracks last update date per repository in YAML state file
 
 ## Architecture Overview
 
@@ -57,7 +59,7 @@ gh-pr-metrics/
 
 **Python Support**: Python 3.10, 3.11, 3.12
 
-**Test Coverage**: 71% (threshold: 70%, 43 unit tests passing)
+**Test Coverage**: 77% (threshold: 70%, 73 unit tests passing)
 
 ### Data Flow
 1. **Input**: User provides repository info and time range via CLI
@@ -73,6 +75,18 @@ gh-pr-metrics/
 - Supports both authenticated and unauthenticated requests
 - Handles pagination automatically for large result sets
 - GitHub.com only (GitHub Enterprise not supported)
+
+### State Management
+- State file location: `~/.gh-pr-metrics-state.yaml`
+- Format: `https://github.com/{owner}/{repo}: {timestamp: ..., csv_file: ...}`
+- Uses full repository URLs (future-proof for GitLab, GitHub Enterprise)
+- Timestamps stored as UTC without timezone component (cleaner, avoids confusion)
+- Stores both last update date AND CSV file path for each repository
+- Enables update-all functionality: `--update` without org/repo updates everything
+- `--update` and `--output` are mutually exclusive (update uses stored path)
+- Stdout-only runs don't update state (no file path to store)
+- Separate state file (not in CSV) to avoid date parsing/validation issues
+- Fails if home directory doesn't exist (doesn't create parent directories)
 
 ### Authentication Strategy
 - Environment variable (`GITHUB_TOKEN`) for simplicity
@@ -119,9 +133,12 @@ gh-pr-metrics/
 
 ### Performance Considerations
 - Minimize API calls through efficient pagination
-- Process data iteratively to manage memory
+- Differential updates: Only fetch new PRs since last update when using `--update`
+- CSV merge strategy: Read existing CSV into dict (O(1) lookups), update in-memory, write atomically
+- Memory-efficient: Process PRs in parallel but write to temp file + atomic rename
 - Progress indicators: "Processing PR 45/150..." style
 - Respects GitHub API pagination (no explicit rate limiting in v0.1.0)
+- Update mode ideal for daily runs across hundreds of repositories
 
 ## CSV Output Format
 
@@ -260,6 +277,7 @@ All dependencies are defined in `pyproject.toml` using modern Python packaging s
 - `requests>=2.28.0`: HTTP client for GitHub API
 - `python-dateutil>=2.8.0`: Flexible date parsing
 - `argcomplete>=2.0.0`: Bash completion for CLI
+- `PyYAML>=6.0.0`: YAML parsing for state file management
 
 ### Development Dependencies (`[project.optional-dependencies.dev]`)
 - `pytest>=7.0.0`: Testing framework
@@ -272,6 +290,7 @@ All dependencies are defined in `pyproject.toml` using modern Python packaging s
 - `mypy>=1.0.0`: Type checking (optional)
 - `types-requests>=2.28.0`: Type stubs for requests
 - `types-python-dateutil>=2.8.0`: Type stubs for dateutil
+- `types-PyYAML>=6.0.0`: Type stubs for PyYAML
 
 Install with: `pip install -e ".[dev]"`
 
@@ -304,6 +323,8 @@ Install with: `pip install -e ".[dev]"`
 - No automatic retry or rate limit handling in v0.1.0
 - Clear error messages when rate limit exceeded
 - Suggestion to use `GITHUB_TOKEN` for higher limits
+- **Differential updates** (`--update`) significantly reduce API calls for repeated runs
+- State tracking ensures only new PRs are fetched
 
 **Future Enhancement**:
 - Check `X-RateLimit-Remaining` header
@@ -316,6 +337,8 @@ Install with: `pip install -e ".[dev]"`
 - Filter PRs by date range early
 - Show progress indicators: "Processing PR 45/150..."
 - Process PRs one at a time, not all in memory
+- **Differential Updates**: Use `--update` to fetch only new PRs since last run
+- State tracking prevents redundant API calls on repeated runs
 
 ### Challenge: Data Consistency
 **Solution**:
@@ -405,6 +428,18 @@ make clean             # Remove temporary files and .venv
 .venv/bin/gh-pr-metrics --output metrics.csv
 ```
 
+### Differential Update Mode
+```bash
+# First run: creates CSV and state file
+.venv/bin/gh-pr-metrics --output metrics.csv
+
+# Subsequent runs: only fetch new PRs since last update
+.venv/bin/gh-pr-metrics --output metrics.csv --update
+
+# Update mode with explicit repository (useful for multiple repos)
+.venv/bin/gh-pr-metrics --owner myorg --repo myrepo --output myrepo-metrics.csv --update
+```
+
 ### With Authentication
 ```bash
 # Set token for private repos or higher rate limits
@@ -476,8 +511,7 @@ DEBUG:root:Fetching reviews for PR #123...
 10. **GraphQL Support**: More efficient data fetching
 11. **Export Formats**: JSON, Excel, Parquet
 12. **Visualizations**: Generate charts from data
-13. **Incremental Updates**: Only fetch new PRs since last run
-14. **Real-time Mode**: Watch for new PRs via webhooks
+13. **Real-time Mode**: Watch for new PRs via webhooks
 
 ## Related Tools and Inspiration
 

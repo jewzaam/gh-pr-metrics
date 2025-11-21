@@ -78,6 +78,18 @@ class TestArgumentParsing:
             args = gh_pr_metrics.parse_arguments()
             assert args.ai_bot_regex == "copilot\\[bot\\]|cursor\\[bot\\]"
 
+    def test_parse_arguments_with_update(self):
+        """Test parsing with update flag."""
+        with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update"]):
+            args = gh_pr_metrics.parse_arguments()
+            assert args.update is True
+
+    def test_parse_arguments_update_default(self):
+        """Test that update defaults to False."""
+        with mock.patch.object(sys, "argv", ["gh-pr-metrics"]):
+            args = gh_pr_metrics.parse_arguments()
+            assert args.update is False
+
 
 class TestLoggingSetup:
     """Test logging configuration."""

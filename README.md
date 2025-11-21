@@ -11,6 +11,7 @@ Analyzes GitHub pull requests and generates CSV reports with metrics including:
 - Comment counts (total and bot-specific)
 - Change request counts (total and unique reviewers)
 - Approval counts and PR status
+- **Differential updates**: Update existing CSV files by fetching only new PRs since last run
 
 ## Installation
 
@@ -38,6 +39,47 @@ gh-pr-metrics --ai-bot-regex "cursor\\[bot\\]|copilot\\[bot\\]"
 # Disable AI bot detection (treat all bots as non-AI)
 gh-pr-metrics --ai-bot-regex ""
 ```
+
+### Differential Updates
+
+For daily or frequent runs, use `--update` to fetch only new PRs since the last run. The state file automatically tracks which CSV file belongs to each repository.
+
+```bash
+# First run: creates CSV and stores path in state file (~/.gh-pr-metrics-state.yaml)
+gh-pr-metrics --owner org1 --repo repo1 --output org1-repo1.csv
+gh-pr-metrics --owner org2 --repo repo2 --output org2-repo2.csv
+
+# Update specific repository (uses stored CSV path)
+gh-pr-metrics --owner org1 --repo repo1 --update
+
+# Update ALL tracked repositories at once
+gh-pr-metrics --update
+
+# Outputs to stdout don't get tracked (no state saved)
+gh-pr-metrics --owner org --repo repo  # No --output = no tracking
+```
+
+**Benefits of `--update` mode:**
+- Significantly reduces API calls (avoids throttling)
+- Faster execution on large repositories
+- Automatically tracks last update date AND CSV path per repository
+- Updates existing PRs in CSV if their status changed
+- Update all repos with single command
+- Ideal for daily/scheduled runs across hundreds of repositories
+
+**State tracking**: The state file `~/.gh-pr-metrics-state.yaml` stores both the last update timestamp and CSV file path for each repository.
+
+```yaml
+# Example state file
+https://github.com/owner/repo:
+  csv_file: /path/to/metrics.csv
+  timestamp: '2024-11-20T15:30:00'
+https://github.com/org1/repo1:
+  csv_file: /path/to/org1-repo1.csv
+  timestamp: '2024-11-21T08:00:00'
+```
+
+**Note**: `--update` and `--output` cannot be used together. Update mode always uses the CSV path stored in the state file.
 
 ### Authentication
 

@@ -40,12 +40,47 @@ gh-pr-metrics --ai-bot-regex "cursor\\[bot\\]|copilot\\[bot\\]"
 gh-pr-metrics --ai-bot-regex ""
 ```
 
+### Repository Initialization
+
+Use `--init` to add repositories to the state file with validation and pattern-based output:
+
+```bash
+# Initialize a single repository
+gh-pr-metrics --init --owner ansible --repo awx --output "data/{owner}-{repo}.csv" --start "2024-11-01"
+
+# Initialize all accessible repos for an owner (validates access to each)
+gh-pr-metrics --init --owner ansible --output "data/{owner}-{repo}.csv" --start "2024-11-01"
+
+# Initialize with default start date (365 days ago)
+gh-pr-metrics --init --owner myorg --output "data/{owner}-{repo}.csv"
+```
+
+**Features:**
+- Validates access to each repository before adding to state
+- Skips repositories that are already tracked
+- Skips inaccessible repositories (private/not found)
+- Creates directory structure automatically
+- Supports `{owner}` and `{repo}` placeholders in output pattern
+- Initializes empty CSV files with headers
+- Records start date in state file for future updates
+
+**Output pattern placeholders:**
+- `{owner}` - Repository owner/organization name
+- `{repo}` - Repository name
+- Example: `data/{owner}-{repo}.csv` → `data/ansible-awx.csv`
+
+After initialization, use `--update-all` to fetch PR data for all tracked repositories.
+
 ### Differential Updates
 
 For daily or frequent runs, use `--update` to fetch only new PRs since the last run. The state file automatically tracks which CSV file belongs to each repository.
 
 ```bash
-# First run: creates CSV and stores path in state file (~/.gh-pr-metrics-state.yaml)
+# Method 1: Initialize multiple repos at once, then update
+gh-pr-metrics --init --owner ansible --output "data/{owner}-{repo}.csv" --start "2024-11-01"
+gh-pr-metrics --update-all  # Fetches PRs for all initialized repos
+
+# Method 2: Manual tracking of individual repos
 gh-pr-metrics --owner org1 --repo repo1 --output org1-repo1.csv
 gh-pr-metrics --owner org2 --repo repo2 --output org2-repo2.csv
 
@@ -53,7 +88,7 @@ gh-pr-metrics --owner org2 --repo repo2 --output org2-repo2.csv
 gh-pr-metrics --owner org1 --repo repo1 --update
 
 # Update ALL tracked repositories at once
-gh-pr-metrics --update
+gh-pr-metrics --update-all
 
 # Outputs to stdout don't get tracked (no state saved)
 gh-pr-metrics --owner org --repo repo  # No --output = no tracking

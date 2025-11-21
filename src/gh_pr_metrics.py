@@ -403,6 +403,73 @@ def check_rate_limit(token: Optional[str] = None) -> None:
     )
 
 
+def list_owner_repos(owner: str, token: Optional[str] = None) -> List[str]:
+    """
+    List all repositories for an owner (user or organization).
+    Returns list of repository names.
+    """
+    repos = []
+    page = 1
+    per_page = 100
+
+    # Try as organization first
+    url_base = f"{GITHUB_API_BASE}/orgs/{owner}/repos"
+    is_org = True
+
+    while True:
+        params = {"page": page, "per_page": per_page, "type": "all"}
+
+        try:
+            response = make_github_request(url_base, token, params)
+        except GitHubAPIError as e:
+            # If org request fails with 404, try as user
+            if "not found" in str(e).lower() and is_org:
+                logging.debug("Not an organization, trying as user: %s", owner)
+                url_base = f"{GITHUB_API_BASE}/users/{owner}/repos"
+                is_org = False
+                page = 1  # Reset page counter
+                continue
+            else:
+                raise
+
+        if not response:
+            break
+
+        for repo in response:
+            repos.append(repo["name"])
+
+        # Break if we got fewer results than requested
+        if len(response) < per_page:
+            break
+
+        page += 1
+
+    return repos
+
+
+def validate_repo_access(owner: str, repo: str, token: Optional[str] = None) -> bool:
+    """
+    Validate that we have access to a repository.
+    Returns True if accessible, False otherwise.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}"
+
+    try:
+        make_github_request(url, token)
+        return True
+    except GitHubAPIError as e:
+        logging.debug("Cannot access %s/%s: %s", owner, repo, e)
+        return False
+
+
+def expand_output_pattern(pattern: str, owner: str, repo: str) -> str:
+    """
+    Expand output pattern with owner and repo placeholders.
+    Supports {owner} and {repo} placeholders.
+    """
+    return pattern.replace("{owner}", owner).replace("{repo}", repo)
+
+
 def make_github_request(
     url: str, token: Optional[str] = None, params: Optional[Dict[str, Any]] = None
 ) -> Any:
@@ -751,15 +818,20 @@ def read_existing_csv(csv_file: str) -> Dict[int, Dict[str, Any]]:
 
 
 def write_csv_output(
-    metrics: List[Dict[str, Any]], output_file: Optional[str], merge_mode: bool = False
+    metrics: List[Dict[str, Any]],
+    output_file: Optional[str],
+    merge_mode: bool = False,
+    force_write: bool = False,
 ) -> None:
     """
     Write metrics to CSV file or stdout.
 
     If merge_mode is True and output_file exists, existing PR data is loaded,
     updated with new metrics, and written back (replacing existing PRs and adding new ones).
+
+    If force_write is True, write headers even if metrics list is empty.
     """
-    if not metrics:
+    if not metrics and not force_write:
         logging.warning("No pull requests to output")
         return
 
@@ -846,11 +918,14 @@ Examples:
   # Output to file (stores path in state for future updates)
   gh-pr-metrics --output metrics.csv
 
+  # Initialize repositories (validates access, creates state entries)
+  gh-pr-metrics --init --owner ansible --output "data/{owner}-{repo}.csv" --start "2024-11-01"
+
   # Update specific repo (uses stored CSV path from state)
   gh-pr-metrics --owner microsoft --repo vscode --update
 
   # Update all tracked repositories
-  gh-pr-metrics --update
+  gh-pr-metrics --update-all
 
 Environment Variables:
   GITHUB_TOKEN    GitHub personal access token for authentication
@@ -868,6 +943,13 @@ Environment Variables:
         help="End timestamp (ISO 8601, RFC 3339, or Unix timestamp). Default: now",
     )
     parser.add_argument("--output", "-o", help="Output file path (default: stdout)")
+    parser.add_argument(
+        "--init",
+        action="store_true",
+        help="Initialize repositories in state file. Validates access and stores --start date. "
+        "Requires --owner and --output. If only --owner provided, initializes all repos. "
+        "Output supports patterns like 'data/{owner}-{repo}.csv'",
+    )
     parser.add_argument(
         "--update",
         action="store_true",
@@ -1110,6 +1192,22 @@ def main() -> int:
     logging.debug("Arguments: %s", args)
 
     # Validate argument combinations
+    if args.init and not args.owner:
+        logging.error("--init requires --owner")
+        return 1
+
+    if args.init and not args.output:
+        logging.error("--init requires --output (supports patterns like 'data/{owner}-{repo}.csv')")
+        return 1
+
+    if args.init and args.end:
+        logging.error("--init cannot be used with --end (uses current time)")
+        return 1
+
+    if args.init and (args.update or args.update_all):
+        logging.error("--init cannot be used with --update or --update-all")
+        return 1
+
     if args.update and args.output:
         logging.error("--update and --output cannot be used together (update uses stored CSV path)")
         return 1
@@ -1154,6 +1252,120 @@ def main() -> int:
 
     # Check and display rate limit status
     check_rate_limit(token)
+
+    # Handle init mode
+    if args.init:
+        owner = args.owner
+        repos_to_init = []
+
+        # If repo specified, just use that one
+        if args.repo:
+            repos_to_init = [args.repo]
+            logging.info("Initializing single repository: %s/%s", owner, args.repo)
+        else:
+            # List all repos for owner
+            logging.info("Listing all repositories for owner: %s", owner)
+            try:
+                repos_to_init = list_owner_repos(owner, token)
+                logging.info("Found %d repositories for %s", len(repos_to_init), owner)
+            except GitHubAPIError as e:
+                logging.error("Failed to list repositories for %s: %s", owner, e)
+                return 1
+
+        if not repos_to_init:
+            logging.error("No repositories found for owner: %s", owner)
+            return 1
+
+        # Determine start date
+        if args.start:
+            start_date = parse_timestamp(args.start)
+        else:
+            start_date = datetime.now(timezone.utc) - timedelta(days=DEFAULT_DAYS_BACK)
+
+        logging.info("Using start date: %s", start_date.isoformat())
+
+        # Filter out already-tracked repos to get accurate count
+        repos_needing_validation = []
+        already_tracked_count = 0
+        for repo in repos_to_init:
+            if get_repo_state(owner, repo):
+                already_tracked_count += 1
+            else:
+                repos_needing_validation.append(repo)
+
+        if already_tracked_count > 0:
+            logging.info(
+                "%d repositories already tracked, %d need validation",
+                already_tracked_count,
+                len(repos_needing_validation),
+            )
+
+        # Check rate limit before validating repos (1 API call per repo)
+        if repos_needing_validation:
+            estimated_calls = len(repos_needing_validation)
+            if not check_sufficient_rate_limit(estimated_calls, token, f"{owner}/*"):
+                logging.error(
+                    "Insufficient API rate limit to validate %d repositories. "
+                    "Each repo requires 1 API call for access validation.",
+                    len(repos_needing_validation),
+                )
+                return 1
+
+        # Validate access and initialize each repo
+        successful = 0
+        failed = 0
+        skipped = 0
+
+        for repo in repos_to_init:
+            # Check if already tracked
+            existing_state = get_repo_state(owner, repo)
+            if existing_state:
+                logging.info(
+                    "[%s/%s] Already tracked (last update: %s), skipping",
+                    owner,
+                    repo,
+                    existing_state["timestamp"].isoformat(),
+                )
+                skipped += 1
+                continue
+
+            # Validate access
+            logging.info("[%s/%s] Validating access...", owner, repo)
+            if not validate_repo_access(owner, repo, token):
+                logging.warning("[%s/%s] Cannot access repository, skipping", owner, repo)
+                failed += 1
+                continue
+
+            # Expand output pattern
+            csv_file = expand_output_pattern(args.output, owner, repo)
+
+            # Create parent directory if needed
+            csv_path = Path(csv_file)
+            if csv_path.parent and not csv_path.parent.exists():
+                logging.info("Creating directory: %s", csv_path.parent)
+                csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Initialize empty CSV file
+            logging.info("[%s/%s] Initializing CSV: %s", owner, repo, csv_file)
+            write_csv_output([], csv_file, merge_mode=False, force_write=True)
+
+            # Update state file
+            update_state_file(owner, repo, start_date, csv_file)
+            logging.info(
+                "[%s/%s] Initialized (start date: %s)", owner, repo, start_date.isoformat()
+            )
+            successful += 1
+
+        # Summary
+        logging.info("=" * 80)
+        logging.info("Initialization complete:")
+        logging.info("  Successful: %d", successful)
+        logging.info("  Skipped (already tracked): %d", skipped)
+        logging.info("  Failed (no access): %d", failed)
+
+        if failed > 0:
+            return 1
+        return 0
 
     # Handle update-all mode
     if args.update_all:

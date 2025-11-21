@@ -187,7 +187,9 @@ class TestMain:
 
         with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all"]):
             with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
-                with mock.patch("gh_pr_metrics.process_repository", return_value=0) as mock_process:
+                with mock.patch(
+                    "gh_pr_metrics.process_repository", return_value=(0, 1, 1)
+                ) as mock_process:
                     result = gh_pr_metrics.main()
                     # Should only process one repo
                     assert mock_process.call_count == 1

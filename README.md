@@ -67,6 +67,14 @@ gh-pr-metrics --owner org --repo repo  # No --output = no tracking
 - Update all repos with single command
 - Ideal for daily/scheduled runs across hundreds of repositories
 
+**Automatic chunking for large date ranges:**
+- Date ranges > 30 days are automatically split into 30-day chunks with 1-day overlap
+- Overlap prevents data loss at chunk boundaries (PRs deduplicated automatically)
+- Rate limit checked before processing each chunk
+- Progress saved after each chunk (can resume with `--update` or `--update-all` if stopped)
+- Prevents rate limit exhaustion on historical backfills
+- Duplicate PRs in overlaps are skipped (saves ~3% API calls)
+
 **State tracking**: The state file `~/.gh-pr-metrics-state.yaml` stores both the last update timestamp and CSV file path for each repository.
 
 ```yaml

@@ -59,7 +59,7 @@ gh-pr-metrics/
 
 **Python Support**: Python 3.10, 3.11, 3.12
 
-**Test Coverage**: 77% (threshold: 70%, 73 unit tests passing)
+**Test Coverage**: 76% (threshold: 70%, 102 unit tests passing)
 
 ### Data Flow
 1. **Input**: User provides repository info and time range via CLI
@@ -134,10 +134,13 @@ gh-pr-metrics/
 ### Performance Considerations
 - Minimize API calls through efficient pagination
 - Differential updates: Only fetch new PRs since last update when using `--update`
+- **Automatic chunking**: Date ranges > 30 days split into 30-day chunks with 1-day overlap
+- **PR deduplication**: Overlap duplicates are skipped (saves ~3% of API calls)
+- **Rate limit awareness**: Estimates API calls needed, checks available quota before processing
+- **Progress preservation**: State updated after each chunk, can resume if stopped
 - CSV merge strategy: Read existing CSV into dict (O(1) lookups), update in-memory, write atomically
 - Memory-efficient: Process PRs in parallel but write to temp file + atomic rename
-- Progress indicators: "Processing PR 45/150..." style
-- Respects GitHub API pagination (no explicit rate limiting in v0.1.0)
+- Progress indicators: "Processing PR 45/150..." style with repo context
 - Update mode ideal for daily runs across hundreds of repositories
 
 ## CSV Output Format
@@ -320,14 +323,15 @@ Install with: `pip install -e ".[dev]"`
 
 ### Challenge: API Rate Limits
 **Current Solution**: 
-- No automatic retry or rate limit handling in v0.1.0
-- Clear error messages when rate limit exceeded
-- Suggestion to use `GITHUB_TOKEN` for higher limits
+- **Automatic chunking**: Date ranges > 30 days split into 30-day chunks
+- **Proactive checking**: Estimates API calls needed and checks quota before processing
+- **Progress preservation**: State updated after each chunk, resume with `--update` if stopped
+- Clear error messages when rate limit exceeded (with reset time)
+- Suggestion to use `GITHUB_TOKEN` for higher limits (5000/hour vs 60/hour)
 - **Differential updates** (`--update`) significantly reduce API calls for repeated runs
 - State tracking ensures only new PRs are fetched
 
 **Future Enhancement**:
-- Check `X-RateLimit-Remaining` header
 - Implement exponential backoff for 403 responses
 - Cache results when possible
 

@@ -54,7 +54,7 @@ class TestGitHubAPIClient:
             },
         )
 
-        with pytest.raises(gh_pr_metrics.GitHubAPIError, match="rate limit"):
+        with pytest.raises(gh_pr_metrics.RateLimitExceeded, match="rate limit"):
             gh_pr_metrics.make_github_request(url)
 
     def test_make_github_request_not_found_error(self, requests_mock):

@@ -41,6 +41,9 @@ DEFAULT_DAYS_BACK = 365
 DEFAULT_WORKERS = 4
 STATE_FILE = Path.home() / ".gh-pr-metrics-state.yaml"
 PR_NUMBER_FIELD = "pr_number"
+MAX_CHUNK_DAYS = 30  # Maximum days to process in a single chunk
+API_CALLS_PER_PR = 4  # Estimate: timeline events, reviews, comments, review comments
+API_SAFETY_BUFFER = 10  # Reserve for safety (unauthenticated limit is 60/hour total)
 
 
 class GitHubAPIError(Exception):
@@ -196,6 +199,87 @@ def update_state_file(owner: str, repo: str, timestamp: datetime, csv_file: str)
     save_state_file(state)
 
 
+def chunk_date_range(
+    start_date: datetime, end_date: datetime, max_days: int = MAX_CHUNK_DAYS
+) -> List[tuple[datetime, datetime]]:
+    """
+    Split a date range into chunks of max_days with 1-day overlap.
+    Returns list of (chunk_start, chunk_end) tuples.
+
+    Overlap ensures no PRs are missed due to timestamp precision.
+    Duplicates are handled by CSV merge (PR number deduplication).
+    """
+    chunks = []
+    current_start = start_date
+
+    while current_start < end_date:
+        # Calculate chunk end (either max_days from start or end_date, whichever is earlier)
+        chunk_end = min(current_start + timedelta(days=max_days), end_date)
+        chunks.append((current_start, chunk_end))
+
+        # Next chunk starts 1 day before this chunk ended (overlap to prevent gaps)
+        # Duplicates will be deduplicated by PR number during CSV merge
+        current_start = chunk_end - timedelta(days=1)
+
+        # Ensure we don't create infinite loops if chunk_end == end_date
+        if chunk_end >= end_date:
+            break
+
+    return chunks
+
+
+def estimate_api_calls_for_prs(pr_count: int) -> int:
+    """
+    Estimate API calls needed to process pr_count PRs.
+    Each PR requires: timeline events, reviews, review comments, issue comments.
+    """
+    return pr_count * API_CALLS_PER_PR
+
+
+def check_sufficient_rate_limit(
+    estimated_calls: int, token: Optional[str], repo_ctx: str, chunk_info: str = ""
+) -> bool:
+    """
+    Check if sufficient API rate limit is available.
+    Returns True if sufficient, False otherwise.
+    Logs appropriate messages.
+
+    chunk_info: Optional string like "Chunk 1/14: " for context
+    """
+    rate_info = get_rate_limit_info(token)
+
+    if not rate_info:
+        logging.warning("[%s] Could not check rate limit, proceeding with caution", repo_ctx)
+        return True
+
+    remaining = rate_info["remaining"]
+    limit = rate_info["limit"]
+    reset_timestamp = rate_info["reset"]
+    reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
+    reset_str = reset_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    # Always show current rate limit status (consistent with initial check format)
+    logging.info(
+        "[%s] API rate limit: %d/%d remaining (resets at %s)", repo_ctx, remaining, limit, reset_str
+    )
+
+    # Show estimated calls for this chunk/operation
+    logging.info("[%s] %sEstimated API calls: ~%d", repo_ctx, chunk_info, estimated_calls)
+
+    if remaining <= (estimated_calls + API_SAFETY_BUFFER):
+        logging.error(
+            "[%s] %sInsufficient API rate limit: need ~%d calls + %d buffer, only %d available",
+            repo_ctx,
+            chunk_info,
+            estimated_calls,
+            API_SAFETY_BUFFER,
+            remaining,
+        )
+        return False
+
+    return True
+
+
 def get_github_token() -> Optional[str]:
     """Get GitHub token from environment."""
     return os.getenv("GITHUB_TOKEN")
@@ -265,8 +349,12 @@ def parse_timestamp(timestamp_str: str) -> datetime:
             raise ValueError(f"Invalid timestamp format: {timestamp_str}") from e
 
 
-def check_rate_limit(token: Optional[str] = None) -> None:
-    """Check and display current GitHub API rate limit status."""
+def get_rate_limit_info(token: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Get GitHub API rate limit information.
+    Returns dict with 'remaining', 'limit', 'reset' keys.
+    Returns empty dict on error.
+    """
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -280,26 +368,39 @@ def check_rate_limit(token: Optional[str] = None) -> None:
         data = response.json()
 
         core = data.get("resources", {}).get("core", {})
-        remaining = core.get("remaining", "unknown")
-        limit = core.get("limit", "unknown")
-        reset_timestamp = core.get("reset", 0)
-
-        if reset_timestamp:
-            from datetime import datetime
-
-            reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
-            reset_str = reset_time.strftime("%Y-%m-%d %H:%M:%S UTC")
-        else:
-            reset_str = "unknown"
-
-        logging.info(
-            "API rate limit: %s/%s remaining (resets at %s)",
-            remaining,
-            limit,
-            reset_str,
-        )
+        return {
+            "remaining": core.get("remaining", 0),
+            "limit": core.get("limit", 0),
+            "reset": core.get("reset", 0),
+        }
     except Exception as e:
         logging.debug("Could not check rate limit: %s", e)
+        return {}
+
+
+def check_rate_limit(token: Optional[str] = None) -> None:
+    """Check and display current GitHub API rate limit status."""
+    rate_info = get_rate_limit_info(token)
+
+    if not rate_info:
+        return
+
+    remaining = rate_info.get("remaining", "unknown")
+    limit = rate_info.get("limit", "unknown")
+    reset_timestamp = rate_info.get("reset", 0)
+
+    if reset_timestamp:
+        reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
+        reset_str = reset_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+    else:
+        reset_str = "unknown"
+
+    logging.info(
+        "API rate limit: %s/%s remaining (resets at %s)",
+        remaining,
+        limit,
+        reset_str,
+    )
 
 
 def make_github_request(
@@ -809,10 +910,12 @@ def process_repository(
     workers: int,
     ai_bot_regex: str,
     merge_mode: bool = False,
-) -> int:
+) -> tuple[int, int, int]:
     """
     Process a single repository and generate/update metrics CSV.
-    Returns 0 on success, 1 on error.
+    Automatically chunks large date ranges to manage API rate limits.
+    Returns (exit_code, chunks_completed, total_chunks).
+    exit_code: 0 on success, 1 on error
     """
     repo_ctx = f"{owner}/{repo}"
 
@@ -821,61 +924,181 @@ def process_repository(
         "[%s] Date range: %s to %s", repo_ctx, start_date.isoformat(), end_date.isoformat()
     )
 
-    try:
-        # Fetch PRs
-        prs = fetch_pull_requests(owner, repo, start_date, end_date, token)
+    # Calculate if chunking is needed
+    total_days = (end_date - start_date).days
+    chunks = chunk_date_range(start_date, end_date, MAX_CHUNK_DAYS)
+    total_chunks = len(chunks)
 
-        if not prs:
-            logging.info("[%s] No pull requests found in the specified date range", repo_ctx)
-            return 0
+    if total_chunks > 1:
+        logging.info(
+            "[%s] Date range spans %d days, splitting into %d chunks of up to %d days each",
+            repo_ctx,
+            total_days,
+            total_chunks,
+            MAX_CHUNK_DAYS,
+        )
 
-        # Process each PR with thread pool
-        metrics = []
-        total_prs = len(prs)
-        completed = 0
+    # Track processed PR numbers to avoid duplicate processing across chunks
+    processed_pr_numbers = set()
+    chunks_completed = 0
 
-        logging.info("[%s] Processing %d PRs with %d workers", repo_ctx, total_prs, workers)
+    # Process each chunk
+    for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks, 1):
+        logging.info(
+            "[%s] Processing chunk %d/%d: %s to %s",
+            repo_ctx,
+            chunk_idx,
+            len(chunks),
+            chunk_start.isoformat(),
+            chunk_end.isoformat(),
+        )
 
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            # Submit all PR processing tasks
-            future_to_pr = {
-                executor.submit(process_pr, pr, owner, repo, token, ai_bot_regex): pr for pr in prs
-            }
+        try:
+            # Fetch PRs for this chunk
+            prs = fetch_pull_requests(owner, repo, chunk_start, chunk_end, token)
 
-            # Collect results as they complete
-            for future in as_completed(future_to_pr):
-                pr = future_to_pr[future]
-                completed += 1
-                try:
-                    pr_metrics = future.result()
-                    metrics.append(pr_metrics)
-                    logging.info(
-                        "[%s] Completed PR %d/%d: #%d",
-                        repo_ctx,
-                        completed,
-                        total_prs,
-                        pr["number"],
-                    )
-                except Exception as e:
-                    logging.error("[%s] Failed to process PR #%d: %s", repo_ctx, pr["number"], e)
-                    # Continue processing other PRs
+            if not prs:
+                logging.info(
+                    "[%s] Chunk %d/%d: No pull requests found",
+                    repo_ctx,
+                    chunk_idx,
+                    total_chunks,
+                )
+                # Update state to this chunk's end date and continue
+                update_state_file(owner, repo, chunk_end, output_file)
+                chunks_completed += 1
+                continue
 
-        # Write output
-        write_csv_output(metrics, output_file, merge_mode=merge_mode)
+            # Filter out PRs already processed (due to overlap)
+            new_prs = [pr for pr in prs if pr["number"] not in processed_pr_numbers]
+            duplicate_count = len(prs) - len(new_prs)
 
-        # Update state file with timestamp and csv path
-        update_state_file(owner, repo, end_date, output_file)
-        logging.info("[%s] Updated state file with timestamp: %s", repo_ctx, end_date.isoformat())
+            if duplicate_count > 0:
+                logging.info(
+                    "[%s] Chunk %d/%d: Skipping %d duplicate PRs "
+                    "(already processed in previous chunk)",
+                    repo_ctx,
+                    chunk_idx,
+                    len(chunks),
+                    duplicate_count,
+                )
 
-        logging.info("[%s] Successfully processed %d pull requests", repo_ctx, len(metrics))
-        return 0
+            if not new_prs:
+                logging.info(
+                    "[%s] Chunk %d/%d: All %d PRs already processed",
+                    repo_ctx,
+                    chunk_idx,
+                    total_chunks,
+                    len(prs),
+                )
+                # Update state to this chunk's end date and continue
+                update_state_file(owner, repo, chunk_end, output_file)
+                chunks_completed += 1
+                continue
 
-    except GitHubAPIError as e:
-        logging.error("[%s] GitHub API error: %s", repo_ctx, e)
-        return 1
-    except Exception as e:
-        logging.error("[%s] Unexpected error: %s", repo_ctx, e, exc_info=True)
-        return 1
+            total_prs = len(new_prs)
+
+            # Check rate limit before processing
+            estimated_calls = estimate_api_calls_for_prs(total_prs)
+            chunk_info_str = f"Chunk {chunk_idx}/{total_chunks}: "
+            if not check_sufficient_rate_limit(estimated_calls, token, repo_ctx, chunk_info_str):
+                logging.error(
+                    "[%s] Stopping at chunk %d/%d due to insufficient rate limit",
+                    repo_ctx,
+                    chunk_idx,
+                    total_chunks,
+                )
+                logging.error(
+                    "[%s] Progress saved. Resume with --update (or --update-all) "
+                    "after rate limit resets.",
+                    repo_ctx,
+                )
+                return 1, chunks_completed, total_chunks
+
+            # Process each PR with thread pool
+            metrics = []
+            completed = 0
+
+            logging.info(
+                "[%s] Chunk %d/%d: Processing %d PRs with %d workers",
+                repo_ctx,
+                chunk_idx,
+                len(chunks),
+                total_prs,
+                workers,
+            )
+
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                # Submit all PR processing tasks (only new PRs, not duplicates)
+                future_to_pr = {
+                    executor.submit(process_pr, pr, owner, repo, token, ai_bot_regex): pr
+                    for pr in new_prs
+                }
+
+                # Collect results as they complete
+                for future in as_completed(future_to_pr):
+                    pr = future_to_pr[future]
+                    completed += 1
+                    pr_number = pr["number"]
+                    try:
+                        pr_metrics = future.result()
+                        metrics.append(pr_metrics)
+                        # Mark this PR as processed
+                        processed_pr_numbers.add(pr_number)
+                        logging.info(
+                            "[%s] Chunk %d/%d: Completed PR %d/%d: #%d",
+                            repo_ctx,
+                            chunk_idx,
+                            len(chunks),
+                            completed,
+                            total_prs,
+                            pr_number,
+                        )
+                    except Exception as e:
+                        logging.error(
+                            "[%s] Chunk %d/%d: Failed to process PR #%d: %s",
+                            repo_ctx,
+                            chunk_idx,
+                            len(chunks),
+                            pr_number,
+                            e,
+                        )
+                        # Continue processing other PRs
+
+            # Write output for this chunk (always merge mode after first chunk)
+            chunk_merge_mode = merge_mode or (chunk_idx > 1)
+            write_csv_output(metrics, output_file, merge_mode=chunk_merge_mode)
+
+            # Update state file with this chunk's end date
+            update_state_file(owner, repo, chunk_end, output_file)
+            chunks_completed += 1
+            logging.info(
+                "[%s] Chunk %d/%d: Processed %d pull requests, updated state to %s",
+                repo_ctx,
+                chunk_idx,
+                total_chunks,
+                len(metrics),
+                chunk_end.isoformat(),
+            )
+
+        except GitHubAPIError as e:
+            logging.error(
+                "[%s] Chunk %d/%d: GitHub API error: %s", repo_ctx, chunk_idx, total_chunks, e
+            )
+            return 1, chunks_completed, total_chunks
+        except Exception as e:
+            logging.error(
+                "[%s] Chunk %d/%d: Unexpected error: %s",
+                repo_ctx,
+                chunk_idx,
+                total_chunks,
+                e,
+                exc_info=True,
+            )
+            return 1, chunks_completed, total_chunks
+
+    logging.info("[%s] Successfully completed all %d chunks", repo_ctx, total_chunks)
+    return 0, chunks_completed, total_chunks
 
 
 def main() -> int:
@@ -949,8 +1172,11 @@ def main() -> int:
 
         logging.info("Updating %d tracked repositories", len(tracked_repos))
 
-        failed = 0
-        for repo_info in tracked_repos:
+        completed_repos = 0
+        partial_repo_info = None
+        unprocessed_count = 0
+
+        for idx, repo_info in enumerate(tracked_repos):
             owner = repo_info["owner"]
             repo = repo_info["repo"]
             csv_file = repo_info["csv_file"]
@@ -958,6 +1184,7 @@ def main() -> int:
 
             if not csv_file:
                 logging.warning("Skipping %s/%s: no CSV file stored in state", owner, repo)
+                unprocessed_count += 1
                 continue
 
             logging.info("=" * 80)
@@ -965,7 +1192,7 @@ def main() -> int:
             start_date = last_update
             end_date = datetime.now(timezone.utc)
 
-            result = process_repository(
+            exit_code, chunks_done, total_chunks = process_repository(
                 owner,
                 repo,
                 csv_file,
@@ -977,12 +1204,51 @@ def main() -> int:
                 merge_mode=True,
             )
 
-            if result != 0:
-                failed += 1
+            if exit_code == 0:
+                completed_repos += 1
+            else:
+                # Stopped early (likely rate limit)
+                partial_repo_info = {
+                    "owner": owner,
+                    "repo": repo,
+                    "chunks_done": chunks_done,
+                    "total_chunks": total_chunks,
+                }
+                # Count remaining repos as unprocessed
+                unprocessed_count = len(tracked_repos) - idx - 1
+
+                logging.warning(
+                    "Stopping update-all: %s/%s partially completed (%d/%d chunks)",
+                    owner,
+                    repo,
+                    chunks_done,
+                    total_chunks,
+                )
+                if unprocessed_count > 0:
+                    logging.warning(
+                        "%d repositories not yet processed (will resume on next --update-all)",
+                        unprocessed_count,
+                    )
+                break
 
         logging.info("=" * 80)
-        logging.info("Completed: %d successful, %d failed", len(tracked_repos) - failed, failed)
-        return 1 if failed > 0 else 0
+
+        # Summary output
+        if partial_repo_info:
+            logging.info("Completed: %d repos fully processed", completed_repos)
+            logging.info(
+                "Partial: %s/%s (%d/%d chunks completed)",
+                partial_repo_info["owner"],
+                partial_repo_info["repo"],
+                partial_repo_info["chunks_done"],
+                partial_repo_info["total_chunks"],
+            )
+            if unprocessed_count > 0:
+                logging.info("Not processed: %d repos", unprocessed_count)
+            return 1  # Incomplete
+        else:
+            logging.info("Successfully processed all %d repositories", completed_repos)
+            return 0
 
     # Get repository info
     owner = args.owner
@@ -1025,7 +1291,7 @@ def main() -> int:
         start_date = repo_state["timestamp"]
         end_date = datetime.now(timezone.utc)
 
-        return process_repository(
+        exit_code, _, _ = process_repository(
             owner,
             repo,
             csv_file,
@@ -1036,6 +1302,7 @@ def main() -> int:
             args.ai_bot_regex,
             merge_mode=True,
         )
+        return exit_code
 
     # Regular mode (non-update)
     if not args.output:
@@ -1055,9 +1322,10 @@ def main() -> int:
 
     # Only store state if output_file is specified (not stdout)
     if output_file:
-        return process_repository(
+        exit_code, _, _ = process_repository(
             owner, repo, output_file, start_date, end_date, token, workers, args.ai_bot_regex
         )
+        return exit_code
     else:
         # stdout mode - don't store state
         try:

@@ -12,9 +12,11 @@ import argparse
 import csv
 import logging
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import yaml
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -30,6 +32,7 @@ except ImportError:
 
 import requests
 from dateutil import parser as date_parser
+from tqdm import tqdm
 
 
 # Version
@@ -45,6 +48,10 @@ MAX_CHUNK_DAYS = 30  # Maximum days to process in a single chunk
 API_CALLS_PER_PR = 4  # Estimate: timeline events, reviews, comments, review comments
 API_SAFETY_BUFFER = 10  # Reserve for safety (unauthenticated limit is 60/hour total)
 
+# Global flags
+_interrupted = False
+_wait_on_rate_limit = False
+
 
 class GitHubAPIError(Exception):
     """Exception raised for GitHub API errors."""
@@ -52,14 +59,66 @@ class GitHubAPIError(Exception):
     pass
 
 
-def setup_logging(debug: bool = False) -> None:
-    """Configure logging based on debug flag."""
-    level = logging.DEBUG if debug else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        stream=sys.stderr,
-    )
+class RateLimitExceeded(Exception):
+    """Exception raised when rate limit is exceeded."""
+
+    def __init__(self, message: str, reset_timestamp: Optional[int] = None):
+        super().__init__(message)
+        self.reset_timestamp = reset_timestamp
+
+
+def signal_handler(signum, frame):
+    """Handle interrupt signal gracefully."""
+    global _interrupted
+    _interrupted = True
+    logging.info("Interrupt received, finishing current operation and exiting gracefully...")
+
+
+class TqdmLoggingHandler(logging.Handler):
+    """Logging handler that uses tqdm.write() to print above progress bars."""
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            tqdm.write(msg, file=sys.stderr)
+        except Exception:
+            self.handleError(record)
+
+
+def setup_logging(debug: bool = False, verbose: bool = False) -> None:
+    """Configure logging based on debug/verbose flags."""
+    if debug:
+        level = logging.DEBUG
+    elif verbose:
+        level = logging.INFO
+    else:
+        level = logging.WARNING  # Default: only warnings and errors
+
+    # Use tqdm-compatible logging handler
+    handler = TqdmLoggingHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+
+    logging.root.setLevel(level)
+    logging.root.handlers = []
+    logging.root.addHandler(handler)
+
+
+def print_status(message: str) -> None:
+    """
+    Print a status line that updates in place (only in non-debug mode).
+    Uses carriage return to overwrite previous status.
+    """
+    if not logging.getLogger().isEnabledFor(logging.DEBUG):
+        # Clear line and print status
+        sys.stderr.write(f"\r\033[K{message}")
+        sys.stderr.flush()
+
+
+def clear_status() -> None:
+    """Clear the status line."""
+    if not logging.getLogger().isEnabledFor(logging.DEBUG):
+        sys.stderr.write("\r\033[K")
+        sys.stderr.flush()
 
 
 def load_state_file() -> Dict[str, str]:
@@ -275,6 +334,10 @@ def check_sufficient_rate_limit(
             API_SAFETY_BUFFER,
             remaining,
         )
+
+        if _wait_on_rate_limit:
+            return wait_for_rate_limit_reset(reset_timestamp)
+
         return False
 
     return True
@@ -403,6 +466,43 @@ def check_rate_limit(token: Optional[str] = None) -> None:
     )
 
 
+def wait_for_rate_limit_reset(reset_timestamp: Optional[int] = None) -> bool:
+    """
+    Wait for rate limit to reset.
+    Returns True if we waited successfully, False if interrupted.
+
+    reset_timestamp: Unix timestamp when rate limit resets (avoids extra API call)
+    """
+    if not reset_timestamp:
+        logging.warning("No reset timestamp available, waiting 60 seconds")
+        time.sleep(60)
+        return not _interrupted
+
+    reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
+    now = datetime.now(timezone.utc)
+    wait_seconds = max(0, int((reset_time - now).total_seconds()) + 5)  # Add 5 second buffer
+
+    if wait_seconds > 0:
+        reset_str = reset_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+        logging.warning(
+            "Rate limit exceeded. Waiting %d seconds until reset at %s",
+            wait_seconds,
+            reset_str,
+        )
+        logging.warning("Press Ctrl+C to stop waiting and exit gracefully")
+
+        # Wait in 1-second intervals so we can check for interrupts
+        for _ in range(wait_seconds):
+            if _interrupted:
+                logging.info("Wait interrupted, exiting gracefully")
+                return False
+            time.sleep(1)
+
+        logging.info("Rate limit should be reset, resuming operations")
+
+    return not _interrupted
+
+
 def list_owner_repos(owner: str, token: Optional[str] = None) -> List[str]:
     """
     List all repositories for an owner (user or organization).
@@ -473,55 +573,66 @@ def expand_output_pattern(pattern: str, owner: str, repo: str) -> str:
 def make_github_request(
     url: str, token: Optional[str] = None, params: Optional[Dict[str, Any]] = None
 ) -> Any:
-    """Make a GitHub API request with error handling."""
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    """Make a GitHub API request with error handling and automatic rate limit waiting."""
+    while True:
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
 
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=30)
-        response.raise_for_status()
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            response.raise_for_status()
 
-        # Log rate limit info on first request (debug only)
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            rate_limit = response.headers.get("X-RateLimit-Remaining")
-            rate_limit_reset = response.headers.get("X-RateLimit-Reset")
-            if rate_limit:
-                logging.debug(
-                    "API rate limit: %s remaining (resets at %s)",
-                    rate_limit,
-                    rate_limit_reset,
-                )
+            # Log rate limit info on first request (debug only)
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                rate_limit = response.headers.get("X-RateLimit-Remaining")
+                rate_limit_reset = response.headers.get("X-RateLimit-Reset")
+                if rate_limit:
+                    logging.debug(
+                        "API rate limit: %s remaining (resets at %s)",
+                        rate_limit,
+                        rate_limit_reset,
+                    )
 
-        return response.json()
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 403:
-            # Check if it's actually a rate limit error
-            rate_limit = e.response.headers.get("X-RateLimit-Remaining")
-            if rate_limit == "0":
-                reset_time = e.response.headers.get("X-RateLimit-Reset", "unknown")
-                auth_status = "authenticated" if token else "unauthenticated"
-                raise GitHubAPIError(
-                    f"GitHub API rate limit exceeded ({auth_status}). "
-                    f"Rate limit resets at {reset_time}. "
-                    f"Limit: {e.response.headers.get('X-RateLimit-Limit', 'unknown')}"
-                )
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 403:
+                # Check if it's actually a rate limit error
+                rate_limit = e.response.headers.get("X-RateLimit-Remaining")
+                if rate_limit == "0":
+                    reset_timestamp_str = e.response.headers.get("X-RateLimit-Reset")
+                    reset_timestamp = int(reset_timestamp_str) if reset_timestamp_str else None
+
+                    # Handle rate limit based on global flag
+                    if _wait_on_rate_limit:
+                        if wait_for_rate_limit_reset(reset_timestamp):
+                            continue  # Retry after successful wait
+                        # If wait was interrupted, raise exception
+
+                    # Not waiting or interrupted - raise exception
+                    auth_status = "authenticated" if token else "unauthenticated"
+                    raise RateLimitExceeded(
+                        f"GitHub API rate limit exceeded ({auth_status}). "
+                        f"Rate limit resets at {reset_timestamp_str}. "
+                        f"Limit: {e.response.headers.get('X-RateLimit-Limit', 'unknown')}",
+                        reset_timestamp=reset_timestamp,
+                    )
+                else:
+                    # 403 but not rate limit - likely permissions
+                    raise GitHubAPIError(
+                        "GitHub API forbidden: insufficient permissions or invalid token."
+                    )
+            elif e.response.status_code == 401:
+                raise GitHubAPIError("GitHub API unauthorized: invalid or expired token.")
+            elif e.response.status_code == 404:
+                raise GitHubAPIError("Repository not found or insufficient permissions.")
             else:
-                # 403 but not rate limit - likely permissions
-                raise GitHubAPIError(
-                    "GitHub API forbidden: insufficient permissions or invalid token."
-                )
-        elif e.response.status_code == 401:
-            raise GitHubAPIError("GitHub API unauthorized: invalid or expired token.")
-        elif e.response.status_code == 404:
-            raise GitHubAPIError("Repository not found or insufficient permissions.")
-        else:
-            raise GitHubAPIError(f"GitHub API error: {e}")
-    except requests.exceptions.RequestException as e:
-        raise GitHubAPIError(f"Network error: {e}")
+                raise GitHubAPIError(f"GitHub API error: {e}")
+        except requests.exceptions.RequestException as e:
+            raise GitHubAPIError(f"Network error: {e}")
 
 
 def fetch_pull_requests(
@@ -964,6 +1075,12 @@ Environment Variables:
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Verbose mode: show detailed INFO logs (default: warnings/errors + progress)",
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=DEFAULT_WORKERS,
@@ -973,6 +1090,12 @@ Environment Variables:
         "--ai-bot-regex",
         default="cursor\\[bot\\]",
         help="Regex pattern to identify AI bots (default: cursor\\[bot\\])",
+    )
+    parser.add_argument(
+        "--wait",
+        action="store_true",
+        help="Automatically wait when rate limit is exceeded instead of exiting. "
+        "Press Ctrl+C during wait to exit gracefully.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
@@ -1024,174 +1147,226 @@ def process_repository(
     processed_pr_numbers = set()
     chunks_completed = 0
 
-    # Process each chunk
-    for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks, 1):
-        logging.info(
-            "[%s] Processing chunk %d/%d: %s to %s",
-            repo_ctx,
-            chunk_idx,
-            len(chunks),
-            chunk_start.isoformat(),
-            chunk_end.isoformat(),
-        )
+    # Get current rate limit for status display
+    rate_info = get_rate_limit_info(token)
+    rate_str = ""
+    if rate_info:
+        rate_str = f"API: {rate_info['remaining']}/{rate_info['limit']}"
 
-        try:
-            # Fetch PRs for this chunk
-            prs = fetch_pull_requests(owner, repo, chunk_start, chunk_end, token)
+    # Create overall status bar for this repository
+    with tqdm(
+        total=total_chunks,
+        desc=f"[{repo_ctx}]",
+        unit="chunk",
+        position=0,
+        leave=True,
+        disable=logging.getLogger().isEnabledFor(logging.DEBUG),
+        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n}/{total} chunks [{postfix}]",
+    ) as repo_bar:
+        repo_bar.set_postfix_str(rate_str)
 
-            if not prs:
-                logging.info(
-                    "[%s] Chunk %d/%d: No pull requests found",
-                    repo_ctx,
-                    chunk_idx,
-                    total_chunks,
-                )
-                # Update state to this chunk's end date and continue
-                update_state_file(owner, repo, chunk_end, output_file)
-                chunks_completed += 1
-                continue
-
-            # Filter out PRs already processed (due to overlap)
-            new_prs = [pr for pr in prs if pr["number"] not in processed_pr_numbers]
-            duplicate_count = len(prs) - len(new_prs)
-
-            if duplicate_count > 0:
-                logging.info(
-                    "[%s] Chunk %d/%d: Skipping %d duplicate PRs "
-                    "(already processed in previous chunk)",
-                    repo_ctx,
-                    chunk_idx,
-                    len(chunks),
-                    duplicate_count,
-                )
-
-            if not new_prs:
-                logging.info(
-                    "[%s] Chunk %d/%d: All %d PRs already processed",
-                    repo_ctx,
-                    chunk_idx,
-                    total_chunks,
-                    len(prs),
-                )
-                # Update state to this chunk's end date and continue
-                update_state_file(owner, repo, chunk_end, output_file)
-                chunks_completed += 1
-                continue
-
-            total_prs = len(new_prs)
-
-            # Check rate limit before processing
-            estimated_calls = estimate_api_calls_for_prs(total_prs)
-            chunk_info_str = f"Chunk {chunk_idx}/{total_chunks}: "
-            if not check_sufficient_rate_limit(estimated_calls, token, repo_ctx, chunk_info_str):
-                logging.error(
-                    "[%s] Stopping at chunk %d/%d due to insufficient rate limit",
-                    repo_ctx,
-                    chunk_idx,
-                    total_chunks,
-                )
-                logging.error(
-                    "[%s] Progress saved. Resume with --update (or --update-all) "
-                    "after rate limit resets.",
-                    repo_ctx,
-                )
-                return 1, chunks_completed, total_chunks
-
-            # Process each PR with thread pool
-            metrics = []
-            completed = 0
-
+        # Process each chunk
+        for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks, 1):
+            repo_bar.set_description(f"[{repo_ctx}] Chunk {chunk_idx}/{total_chunks}")
             logging.info(
-                "[%s] Chunk %d/%d: Processing %d PRs with %d workers",
+                "[%s] Processing chunk %d/%d: %s to %s",
                 repo_ctx,
                 chunk_idx,
                 len(chunks),
-                total_prs,
-                workers,
-            )
-
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                # Submit all PR processing tasks (only new PRs, not duplicates)
-                future_to_pr = {
-                    executor.submit(process_pr, pr, owner, repo, token, ai_bot_regex): pr
-                    for pr in new_prs
-                }
-
-                # Collect results as they complete
-                for future in as_completed(future_to_pr):
-                    pr = future_to_pr[future]
-                    completed += 1
-                    pr_number = pr["number"]
-                    try:
-                        pr_metrics = future.result()
-                        metrics.append(pr_metrics)
-                        # Mark this PR as processed
-                        processed_pr_numbers.add(pr_number)
-                        logging.info(
-                            "[%s] Chunk %d/%d: Completed PR %d/%d: #%d",
-                            repo_ctx,
-                            chunk_idx,
-                            len(chunks),
-                            completed,
-                            total_prs,
-                            pr_number,
-                        )
-                    except Exception as e:
-                        logging.error(
-                            "[%s] Chunk %d/%d: Failed to process PR #%d: %s",
-                            repo_ctx,
-                            chunk_idx,
-                            len(chunks),
-                            pr_number,
-                            e,
-                        )
-                        # Continue processing other PRs
-
-            # Write output for this chunk (always merge mode after first chunk)
-            chunk_merge_mode = merge_mode or (chunk_idx > 1)
-            write_csv_output(metrics, output_file, merge_mode=chunk_merge_mode)
-
-            # Update state file with this chunk's end date
-            update_state_file(owner, repo, chunk_end, output_file)
-            chunks_completed += 1
-            logging.info(
-                "[%s] Chunk %d/%d: Processed %d pull requests, updated state to %s",
-                repo_ctx,
-                chunk_idx,
-                total_chunks,
-                len(metrics),
+                chunk_start.isoformat(),
                 chunk_end.isoformat(),
             )
 
-        except GitHubAPIError as e:
-            logging.error(
-                "[%s] Chunk %d/%d: GitHub API error: %s", repo_ctx, chunk_idx, total_chunks, e
-            )
-            return 1, chunks_completed, total_chunks
-        except Exception as e:
-            logging.error(
-                "[%s] Chunk %d/%d: Unexpected error: %s",
-                repo_ctx,
-                chunk_idx,
-                total_chunks,
-                e,
-                exc_info=True,
-            )
-            return 1, chunks_completed, total_chunks
+            try:
+                # Fetch PRs for this chunk
+                repo_bar.set_postfix_str(f"{rate_str} - Fetching PRs")
+                prs = fetch_pull_requests(owner, repo, chunk_start, chunk_end, token)
 
-    logging.info("[%s] Successfully completed all %d chunks", repo_ctx, total_chunks)
-    return 0, chunks_completed, total_chunks
+                if not prs:
+                    logging.info(
+                        "[%s] Chunk %d/%d: No pull requests found",
+                        repo_ctx,
+                        chunk_idx,
+                        total_chunks,
+                    )
+                    # Update state to this chunk's end date and continue
+                    update_state_file(owner, repo, chunk_end, output_file)
+                    chunks_completed += 1
+                    repo_bar.update(1)
+                    continue
+
+                # Filter out PRs already processed (due to overlap)
+                new_prs = [pr for pr in prs if pr["number"] not in processed_pr_numbers]
+                duplicate_count = len(prs) - len(new_prs)
+
+                if duplicate_count > 0:
+                    logging.info(
+                        "[%s] Chunk %d/%d: Skipping %d duplicate PRs "
+                        "(already processed in previous chunk)",
+                        repo_ctx,
+                        chunk_idx,
+                        len(chunks),
+                        duplicate_count,
+                    )
+
+                if not new_prs:
+                    logging.info(
+                        "[%s] Chunk %d/%d: All %d PRs already processed",
+                        repo_ctx,
+                        chunk_idx,
+                        total_chunks,
+                        len(prs),
+                    )
+                    # Update state to this chunk's end date and continue
+                    update_state_file(owner, repo, chunk_end, output_file)
+                    chunks_completed += 1
+                    repo_bar.update(1)
+                    continue
+
+                total_prs = len(new_prs)
+
+                # Update rate limit info
+                rate_info = get_rate_limit_info(token)
+                if rate_info:
+                    rate_str = f"API: {rate_info['remaining']}/{rate_info['limit']}"
+                    repo_bar.set_postfix_str(rate_str)
+
+                # Check rate limit before processing
+                repo_bar.set_postfix_str(f"{rate_str} - Checking quota")
+                estimated_calls = estimate_api_calls_for_prs(total_prs)
+                chunk_info_str = f"Chunk {chunk_idx}/{total_chunks}: "
+                if not check_sufficient_rate_limit(
+                    estimated_calls, token, repo_ctx, chunk_info_str
+                ):
+                    logging.error(
+                        "[%s] Stopping at chunk %d/%d due to insufficient rate limit",
+                        repo_ctx,
+                        chunk_idx,
+                        total_chunks,
+                    )
+                    logging.error(
+                        "[%s] Progress saved. Resume with --update (or --update-all) "
+                        "after rate limit resets.",
+                        repo_ctx,
+                    )
+                    return 1, chunks_completed, total_chunks
+
+                # Process each PR with thread pool
+                metrics = []
+                completed = 0
+
+                logging.info(
+                    "[%s] Chunk %d/%d: Processing %d PRs with %d workers",
+                    repo_ctx,
+                    chunk_idx,
+                    len(chunks),
+                    total_prs,
+                    workers,
+                )
+
+                repo_bar.set_postfix_str(f"{rate_str} - Processing {total_prs} PRs")
+
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    # Submit all PR processing tasks (only new PRs, not duplicates)
+                    future_to_pr = {
+                        executor.submit(process_pr, pr, owner, repo, token, ai_bot_regex): pr
+                        for pr in new_prs
+                    }
+
+                    # Collect results as they complete with progress bar
+                    with tqdm(
+                        total=total_prs,
+                        desc="  PRs",
+                        unit="PR",
+                        position=1,
+                        leave=False,
+                        disable=logging.getLogger().isEnabledFor(logging.DEBUG),
+                    ) as pbar:
+                        for future in as_completed(future_to_pr):
+                            pr = future_to_pr[future]
+                            completed += 1
+                            pr_number = pr["number"]
+                            try:
+                                pr_metrics = future.result()
+                                metrics.append(pr_metrics)
+                                # Mark this PR as processed
+                                processed_pr_numbers.add(pr_number)
+                                pbar.update(1)
+                                # Update repo bar postfix with current status
+                                repo_bar.set_postfix_str(
+                                    f"{rate_str} - {completed}/{total_prs} PRs"
+                                )
+                            except Exception as e:
+                                logging.error(
+                                    "[%s] Chunk %d/%d: Failed to process PR #%d: %s",
+                                    repo_ctx,
+                                    chunk_idx,
+                                    len(chunks),
+                                    pr_number,
+                                    e,
+                                )
+                                pbar.update(1)
+                                # Continue processing other PRs
+
+                # Write output for this chunk (always merge mode after first chunk)
+                repo_bar.set_postfix_str(f"{rate_str} - Writing CSV")
+                chunk_merge_mode = merge_mode or (chunk_idx > 1)
+                write_csv_output(metrics, output_file, merge_mode=chunk_merge_mode)
+
+                # Update state file with this chunk's end date
+                update_state_file(owner, repo, chunk_end, output_file)
+                chunks_completed += 1
+                repo_bar.update(1)
+                logging.info(
+                    "[%s] Chunk %d/%d: Processed %d pull requests, updated state to %s",
+                    repo_ctx,
+                    chunk_idx,
+                    total_chunks,
+                    len(metrics),
+                    chunk_end.isoformat(),
+                )
+
+            except GitHubAPIError as e:
+                logging.error(
+                    "[%s] Chunk %d/%d: GitHub API error: %s", repo_ctx, chunk_idx, total_chunks, e
+                )
+                return 1, chunks_completed, total_chunks
+            except Exception as e:
+                logging.error(
+                    "[%s] Chunk %d/%d: Unexpected error: %s",
+                    repo_ctx,
+                    chunk_idx,
+                    total_chunks,
+                    e,
+                    exc_info=True,
+                )
+                return 1, chunks_completed, total_chunks
+
+        logging.info("[%s] Successfully completed all %d chunks", repo_ctx, total_chunks)
+        return 0, chunks_completed, total_chunks
 
 
 def main() -> int:
     """Main entry point."""
+    global _wait_on_rate_limit
+
+    # Set up signal handler for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+
     args = parse_arguments()
-    setup_logging(args.debug)
+    setup_logging(args.debug, args.verbose)
+
+    # Set global wait flag from args
+    _wait_on_rate_limit = args.wait
 
     logging.info("GitHub PR Metrics Tool v%s", __version__)
     logging.debug("Arguments: %s", args)
 
     # Validate argument combinations
+    if args.debug and args.verbose:
+        logging.error("--debug and --verbose cannot be used together")
+        return 1
+
     if args.init and not args.owner:
         logging.error("--init requires --owner")
         return 1
@@ -1320,12 +1495,6 @@ def main() -> int:
             # Check if already tracked
             existing_state = get_repo_state(owner, repo)
             if existing_state:
-                logging.info(
-                    "[%s/%s] Already tracked (last update: %s), skipping",
-                    owner,
-                    repo,
-                    existing_state["timestamp"].isoformat(),
-                )
                 skipped += 1
                 continue
 
@@ -1559,15 +1728,22 @@ def main() -> int:
                     for pr in prs
                 }
 
-                for future in as_completed(future_to_pr):
-                    pr = future_to_pr[future]
-                    completed += 1
-                    try:
-                        pr_metrics = future.result()
-                        metrics.append(pr_metrics)
-                        logging.info("Completed PR %d/%d: #%d", completed, total_prs, pr["number"])
-                    except Exception as e:
-                        logging.error("Failed to process PR #%d: %s", pr["number"], e)
+                with tqdm(
+                    total=total_prs,
+                    desc="Processing PRs",
+                    unit="PR",
+                    disable=logging.getLogger().isEnabledFor(logging.DEBUG),
+                ) as pbar:
+                    for future in as_completed(future_to_pr):
+                        pr = future_to_pr[future]
+                        completed += 1
+                        try:
+                            pr_metrics = future.result()
+                            metrics.append(pr_metrics)
+                            pbar.update(1)
+                        except Exception as e:
+                            logging.error("Failed to process PR #%d: %s", pr["number"], e)
+                            pbar.update(1)
 
             write_csv_output(metrics, None, merge_mode=False)
             logging.info("Successfully processed %d pull requests", len(metrics))

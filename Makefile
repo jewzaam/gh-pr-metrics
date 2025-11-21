@@ -20,6 +20,3 @@ help: ## Display this help message
 	@echo "Available targets:"
 	@echo ""
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
-
-update:
-	@GITHUB_TOKEN=$(gh auth token) gh-pr-metrics --workers 16 --update-all

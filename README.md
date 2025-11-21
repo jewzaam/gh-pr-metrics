@@ -110,6 +110,38 @@ gh-pr-metrics --owner org --repo repo  # No --output = no tracking
 - Prevents rate limit exhaustion on historical backfills
 - Duplicate PRs in overlaps are skipped (saves ~3% API calls)
 
+**Automatic rate limit waiting:**
+- Add `--wait` flag to automatically wait when rate limit is exceeded
+- Works for both pre-checks and mid-operation rate limit hits
+- Calculates exact wait time until reset (no extra API calls)
+- Press Ctrl+C during wait to exit gracefully (no ugly stack traces)
+- Ideal for unattended batch operations
+
+```bash
+# Wait automatically if rate limit is hit (unattended mode)
+gh-pr-metrics --update-all --wait
+
+# Without --wait, stops immediately on rate limit (default)
+gh-pr-metrics --update-all
+```
+
+**Clean progress display:**
+- Default mode shows only progress bars and warnings/errors (quiet)
+- Add `--verbose` for detailed INFO logging
+- Add `--debug` for maximum verbosity
+- Progress bars auto-disable in debug/verbose modes
+
+```bash
+# Default: clean progress bars only
+gh-pr-metrics --update-all --wait
+
+# Verbose: detailed logs + progress bars
+gh-pr-metrics --update-all --wait --verbose
+
+# Debug: everything
+gh-pr-metrics --update-all --wait --debug
+```
+
 **State tracking**: The state file `~/.gh-pr-metrics-state.yaml` stores both the last update timestamp and CSV file path for each repository.
 
 ```yaml

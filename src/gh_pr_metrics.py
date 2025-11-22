@@ -1382,6 +1382,9 @@ def main() -> int:
             )
             return 1
 
+        # Sort repositories by timestamp (oldest first)
+        tracked_repos.sort(key=lambda r: r["timestamp"])
+
         logging.info("Updating %d tracked repositories", len(tracked_repos))
 
         completed_repos = 0

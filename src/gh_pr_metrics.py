@@ -378,173 +378,190 @@ class StateManager:
         return repos
 
 
+class GitHubClient:
+    """
+    GitHub API client for making authenticated requests.
+
+    Handles all communication with GitHub API and automatically
+    updates quota tracking from response headers.
+    """
+
+    def __init__(self, token: Optional[str] = None):
+        """Initialize GitHub client with optional token."""
+        self._token = token
+
+    def make_request(self, url: str, params: Optional[Dict[str, Any]] = None) -> Any:
+        """Make a GitHub API request with error handling."""
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            response.raise_for_status()
+
+            # Update quota tracking from response headers
+            quota_manager.update_from_headers(response.headers)
+
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 403:
+                # Check if it's actually a rate limit error
+                rate_limit = e.response.headers.get("X-RateLimit-Remaining")
+                if rate_limit == "0":
+                    reset_time = e.response.headers.get("X-RateLimit-Reset", "unknown")
+                    auth_status = "authenticated" if self._token else "unauthenticated"
+                    raise GitHubAPIError(
+                        f"GitHub API rate limit exceeded ({auth_status}). "
+                        f"Rate limit resets at {reset_time}. "
+                        f"Limit: {e.response.headers.get('X-RateLimit-Limit', 'unknown')}"
+                    )
+                else:
+                    # 403 but not rate limit - likely permissions
+                    raise GitHubAPIError(
+                        "GitHub API forbidden: insufficient permissions or invalid token."
+                    )
+            elif e.response.status_code == 401:
+                raise GitHubAPIError("GitHub API unauthorized: invalid or expired token.")
+            elif e.response.status_code == 404:
+                raise GitHubAPIError("Repository not found or insufficient permissions.")
+            else:
+                raise GitHubAPIError(f"GitHub API error: {e}")
+        except requests.exceptions.RequestException as e:
+            raise GitHubAPIError(f"Network error: {e}")
+
+    def fetch_prs_page(
+        self,
+        owner: str,
+        repo: str,
+        start_date: datetime,
+        end_date: datetime,
+        page: int = 1,
+        per_page: int = 100,
+    ) -> tuple[List[Dict[str, Any]], bool]:
+        """
+        Fetch a single page of pull requests sorted by updated date.
+        Returns (prs_in_range, has_more_pages).
+        """
+        url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls"
+
+        params = {
+            "state": "all",
+            "sort": "updated",
+            "direction": "asc",  # Oldest first
+            "page": page,
+            "per_page": per_page,
+        }
+
+        prs = self.make_request(url, params)
+
+        if not prs:
+            return [], False
+
+        prs_in_range = []
+
+        for pr in prs:
+            updated_at = date_parser.parse(pr["updated_at"])
+
+            # Stop if we're before the start date
+            if updated_at < start_date:
+                return prs_in_range, False
+
+            # Only include PRs within date range
+            if start_date <= updated_at <= end_date:
+                prs_in_range.append(pr)
+
+        # If we got a full page, there might be more
+        has_more = len(prs) == per_page
+
+        return prs_in_range, has_more
+
+    def list_repos(self, owner: str) -> List[str]:
+        """
+        List all repositories for an owner (user or organization).
+        Returns list of repository names.
+        """
+        repos = []
+        page = 1
+        per_page = 100
+
+        # Try as organization first
+        url_base = f"{GITHUB_API_BASE}/orgs/{owner}/repos"
+        is_org = True
+
+        while True:
+            params = {"page": page, "per_page": per_page, "type": "all"}
+
+            try:
+                response = self.make_request(url_base, params)
+            except GitHubAPIError as e:
+                # If org request fails with 404, try as user
+                if "not found" in str(e).lower() and is_org:
+                    log_debug("Not an organization, trying as user: %s", owner)
+                    url_base = f"{GITHUB_API_BASE}/users/{owner}/repos"
+                    is_org = False
+                    page = 1  # Reset page counter
+                    continue
+                else:
+                    raise
+
+            if not response:
+                break
+
+            for repo in response:
+                repos.append(repo["name"])
+
+            # Break if we got fewer results than requested
+            if len(response) < per_page:
+                break
+
+            page += 1
+
+        return repos
+
+    def validate_repo_access(self, owner: str, repo: str) -> bool:
+        """
+        Validate that we have access to a repository.
+        Returns True if accessible, False otherwise.
+        """
+        url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}"
+
+        try:
+            self.make_request(url)
+            return True
+        except GitHubAPIError as e:
+            log_debug("Cannot access %s/%s: %s", owner, repo, e)
+            return False
+
+    def fetch_timeline_events(self, owner: str, repo: str, pr_number: int) -> List[Dict[str, Any]]:
+        """Fetch timeline events for a PR."""
+        url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{pr_number}/events"
+        return self.make_request(url)
+
+    def fetch_issue_comments(self, comments_url: str) -> List[Dict[str, Any]]:
+        """Fetch issue comments using the comments_url from PR data."""
+        return self.make_request(comments_url)
+
+    def fetch_review_comments(self, review_comments_url: str) -> List[Dict[str, Any]]:
+        """Fetch review comments using the review_comments_url from PR data."""
+        return self.make_request(review_comments_url)
+
+    def fetch_reviews(self, owner: str, repo: str, pr_number: int) -> List[Dict[str, Any]]:
+        """Fetch reviews for a PR."""
+        url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
+        return self.make_request(url)
+
+
 # ============================================================================
 # Global Manager Instances
 # ============================================================================
 
 quota_manager = QuotaManager()
 state_manager = StateManager()
-
-
-# ============================================================================
-# GitHub API Functions
-# ============================================================================
-
-
-def make_github_request(
-    url: str, token: Optional[str] = None, params: Optional[Dict[str, Any]] = None
-) -> Any:
-    """Make a GitHub API request with error handling."""
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=30)
-        response.raise_for_status()
-
-        # Update quota tracking from response headers
-        quota_manager.update_from_headers(response.headers)
-
-        return response.json()
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 403:
-            # Check if it's actually a rate limit error
-            rate_limit = e.response.headers.get("X-RateLimit-Remaining")
-            if rate_limit == "0":
-                reset_time = e.response.headers.get("X-RateLimit-Reset", "unknown")
-                auth_status = "authenticated" if token else "unauthenticated"
-                raise GitHubAPIError(
-                    f"GitHub API rate limit exceeded ({auth_status}). "
-                    f"Rate limit resets at {reset_time}. "
-                    f"Limit: {e.response.headers.get('X-RateLimit-Limit', 'unknown')}"
-                )
-            else:
-                # 403 but not rate limit - likely permissions
-                raise GitHubAPIError(
-                    "GitHub API forbidden: insufficient permissions or invalid token."
-                )
-        elif e.response.status_code == 401:
-            raise GitHubAPIError("GitHub API unauthorized: invalid or expired token.")
-        elif e.response.status_code == 404:
-            raise GitHubAPIError("Repository not found or insufficient permissions.")
-        else:
-            raise GitHubAPIError(f"GitHub API error: {e}")
-    except requests.exceptions.RequestException as e:
-        raise GitHubAPIError(f"Network error: {e}")
-
-
-def fetch_pull_requests_page(
-    owner: str,
-    repo: str,
-    start_date: datetime,
-    end_date: datetime,
-    token: Optional[str],
-    page: int = 1,
-    per_page: int = 100,
-) -> tuple[List[Dict[str, Any]], bool]:
-    """
-    Fetch a single page of pull requests sorted by updated date.
-    Returns (prs_in_range, has_more_pages).
-
-    PRs are sorted by updated date (newest first) to enable incremental processing.
-    has_more_pages: True if there might be more PRs to fetch
-    """
-    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls"
-
-    params = {
-        "state": "all",
-        "sort": "updated",  # Sort by updated, not created
-        "direction": "asc",  # Oldest first (chronological order)
-        "page": page,
-        "per_page": per_page,
-    }
-
-    prs = make_github_request(url, token, params)
-
-    if not prs:
-        return [], False
-
-    prs_in_range = []
-
-    for pr in prs:
-        updated_at = date_parser.parse(pr["updated_at"])
-
-        # Stop if we're before the start date
-        if updated_at < start_date:
-            # No more PRs will be in range
-            return prs_in_range, False
-
-        # Only include PRs within date range
-        if start_date <= updated_at <= end_date:
-            prs_in_range.append(pr)
-
-    # If we got a full page, there might be more
-    has_more = len(prs) == per_page
-
-    return prs_in_range, has_more
-
-
-def list_owner_repos(owner: str, token: Optional[str] = None) -> List[str]:
-    """
-    List all repositories for an owner (user or organization).
-    Returns list of repository names.
-    """
-    repos = []
-    page = 1
-    per_page = 100
-
-    # Try as organization first
-    url_base = f"{GITHUB_API_BASE}/orgs/{owner}/repos"
-    is_org = True
-
-    while True:
-        params = {"page": page, "per_page": per_page, "type": "all"}
-
-        try:
-            response = make_github_request(url_base, token, params)
-        except GitHubAPIError as e:
-            # If org request fails with 404, try as user
-            if "not found" in str(e).lower() and is_org:
-                log_debug("Not an organization, trying as user: %s", owner)
-                url_base = f"{GITHUB_API_BASE}/users/{owner}/repos"
-                is_org = False
-                page = 1  # Reset page counter
-                continue
-            else:
-                raise
-
-        if not response:
-            break
-
-        for repo in response:
-            repos.append(repo["name"])
-
-        # Break if we got fewer results than requested
-        if len(response) < per_page:
-            break
-
-        page += 1
-
-    return repos
-
-
-def validate_repo_access(owner: str, repo: str, token: Optional[str] = None) -> bool:
-    """
-    Validate that we have access to a repository.
-    Returns True if accessible, False otherwise.
-    """
-    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}"
-
-    try:
-        make_github_request(url, token)
-        return True
-    except GitHubAPIError as e:
-        log_debug("Cannot access %s/%s: %s", owner, repo, e)
-        return False
+github_client = None  # Initialized in main() with token
 
 
 # ============================================================================
@@ -559,9 +576,8 @@ def get_ready_for_review_time(
     # If never a draft, use created_at
     if not pr.get("draft", False) and pr.get("created_at"):
         # Check events to see if it was ever a draft
-        events_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{pr['number']}/events"
         try:
-            events = make_github_request(events_url, token)
+            events = github_client.fetch_timeline_events(owner, repo, pr["number"])
             ready_events = [e for e in events if e.get("event") == "ready_for_review"]
             if ready_events:
                 # Use the latest ready_for_review event
@@ -593,7 +609,7 @@ def count_comments(
     # Issue comments (general PR comments)
     comments_url = pr["comments_url"]
     try:
-        comments = make_github_request(comments_url, token)
+        comments = github_client.fetch_issue_comments(comments_url)
         for comment in comments:
             total_comments += 1
             if comment.get("user", {}).get("type") == "Bot":
@@ -610,7 +626,7 @@ def count_comments(
     # Review comments (inline code comments)
     review_comments_url = pr["review_comments_url"]
     try:
-        review_comments = make_github_request(review_comments_url, token)
+        review_comments = github_client.fetch_review_comments(review_comments_url)
         for comment in review_comments:
             total_comments += 1
             if comment.get("user", {}).get("type") == "Bot":
@@ -644,10 +660,8 @@ def get_review_metrics(
     Get review metrics: changes requested count, unique change requesters, approvals.
     Returns (changes_requested_count, unique_change_requesters, approval_count).
     """
-    reviews_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr['number']}/reviews"
-
     try:
-        reviews = make_github_request(reviews_url, token)
+        reviews = github_client.fetch_reviews(owner, repo, pr["number"])
     except GitHubAPIError as e:
         log_debug("Failed to fetch reviews for PR #%d: %s", pr["number"], e)
         return 0, 0, 0
@@ -1023,8 +1037,8 @@ def process_repository(
     try:
         while True:
             # Fetch one page of PRs
-            prs, has_more = fetch_pull_requests_page(
-                owner, repo, start_date, end_date, token, page, per_page
+            prs, has_more = github_client.fetch_prs_page(
+                owner, repo, start_date, end_date, page, per_page
             )
             total_pages_fetched = page
 
@@ -1213,8 +1227,11 @@ def main() -> int:
         log_error("--update and --update-all cannot be used together")
         return 1
 
-    # Get GitHub token
+    # Get GitHub token and initialize client
     token = get_github_token()
+    global github_client
+    github_client = GitHubClient(token)
+
     if not token:
         log_warning(
             "No GITHUB_TOKEN found. API rate limits will be restrictive "
@@ -1263,7 +1280,7 @@ def main() -> int:
             # List all repos for owner
             log_info("Listing all repositories for owner: %s", owner)
             try:
-                repos_to_init = list_owner_repos(owner, token)
+                repos_to_init = github_client.list_repos(owner)
                 log_info("Found %d repositories for %s", len(repos_to_init), owner)
             except GitHubAPIError as e:
                 log_error("Failed to list repositories for %s: %s", owner, e)
@@ -1329,7 +1346,7 @@ def main() -> int:
 
             # Validate access
             log_info("[%s/%s] Validating access...", owner, repo)
-            if not validate_repo_access(owner, repo, token):
+            if not github_client.validate_repo_access(owner, repo):
                 log_warning("[%s/%s] Cannot access repository, skipping", owner, repo)
                 failed += 1
                 continue
@@ -1585,8 +1602,8 @@ def main() -> int:
             page = 1
 
             while True:
-                prs, has_more = fetch_pull_requests_page(
-                    owner, repo, start_date, end_date, token, page
+                prs, has_more = github_client.fetch_prs_page(
+                    owner, repo, start_date, end_date, page
                 )
 
                 if prs:

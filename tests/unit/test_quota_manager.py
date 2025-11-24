@@ -251,3 +251,73 @@ class TestQuotaManager:
         for prefix in results:
             assert prefix.startswith("[API ")
             assert prefix.endswith("]")
+
+    def test_check_sufficient_enough_quota(self):
+        """Test check_sufficient when sufficient quota available."""
+        manager = gh_pr_metrics.QuotaManager()
+        manager._remaining = 1000
+        manager._limit = 5000
+
+        sufficient, max_prs = manager.check_sufficient(400, "owner/repo")
+
+        assert sufficient is True
+        assert max_prs > 0
+
+    def test_check_sufficient_insufficient_quota(self):
+        """Test check_sufficient when insufficient quota."""
+        manager = gh_pr_metrics.QuotaManager()
+        manager._limit = 5000
+        manager._remaining = 100  # Not enough for 400 + 250 buffer
+
+        sufficient, max_prs = manager.check_sufficient(400, "owner/repo")
+
+        assert sufficient is False
+        assert max_prs >= 0
+
+    def test_check_sufficient_at_boundary(self):
+        """Test check_sufficient at exact boundary."""
+        manager = gh_pr_metrics.QuotaManager()
+        manager._remaining = 410
+        manager._limit = 5000
+
+        # With 5% reserve of 5000 = 250
+        # 410 <= (400 + 250) is True, so insufficient
+        sufficient, max_prs = manager.check_sufficient(400, "owner/repo")
+
+        assert sufficient is False
+        assert max_prs >= 0
+
+    def test_check_sufficient_just_above_boundary(self):
+        """Test check_sufficient just above boundary with 5% reserve."""
+        manager = gh_pr_metrics.QuotaManager()
+        manager._limit = 5000
+        manager._remaining = 651  # One more than 400 + 250 buffer
+
+        sufficient, max_prs = manager.check_sufficient(400, "owner/repo")
+
+        assert sufficient is True
+        assert max_prs > 0
+
+    def test_check_sufficient_not_initialized(self, requests_mock):
+        """Test check_sufficient with lazy initialization."""
+        manager = gh_pr_metrics.QuotaManager()
+        # Uninitialized state
+
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={
+                "resources": {
+                    "core": {
+                        "limit": 5000,
+                        "remaining": 4500,
+                        "reset": 1699999999,
+                    }
+                }
+            },
+        )
+
+        sufficient, max_prs = manager.check_sufficient(400, "owner/repo")
+
+        # Should initialize and succeed
+        assert sufficient is True
+        assert max_prs > 0

@@ -188,6 +188,59 @@ class QuotaManager:
         log_info("Quota reset complete, refreshing quota like startup...")
         return True
 
+    def check_sufficient(
+        self, estimated_calls: int, repo_ctx: str, chunk_info: str = ""
+    ) -> tuple[bool, int]:
+        """
+        Check if sufficient API rate limit available for estimated calls.
+        Does NOT make an API call - uses current quota.
+
+        Returns (sufficient, max_prs_possible).
+        repo_ctx: Context string like "[owner/repo]" for logging
+        chunk_info: Optional string like "Page 1: " for context
+        """
+        # Use current quota (no API call unless not initialized)
+        remaining, limit, _ = self.get_current_quota()
+
+        if limit == 0:
+            # Quota not initialized yet - initialize it now (one-time API call)
+            log_warning("[%s] Quota not initialized, fetching current status", repo_ctx)
+            rate_info = self.initialize(get_github_token())
+            if not rate_info:
+                # Failed to get quota - cannot proceed safely
+                log_error("[%s] Failed to fetch quota, cannot verify rate limit", repo_ctx)
+                return False, 0
+            remaining = rate_info["remaining"]
+            limit = rate_info["limit"]
+
+        # Calculate max PRs we can handle
+        max_prs = self.calculate_max_prs()
+
+        # Calculate effective buffer (5% of total or fixed buffer, whichever is larger)
+        reserve = int(limit * API_QUOTA_RESERVE_PCT)
+        effective_buffer = max(API_SAFETY_BUFFER, reserve)
+
+        # Show estimated calls for this operation
+        log_info("[%s] %sEstimated API calls: ~%d", repo_ctx, chunk_info, estimated_calls)
+
+        if remaining <= (estimated_calls + effective_buffer):
+            log_error(
+                "[%s] %sInsufficient API rate limit: need ~%d calls + %d buffer "
+                "(reserve=%d), only %d available",
+                repo_ctx,
+                chunk_info,
+                estimated_calls,
+                effective_buffer,
+                reserve,
+                remaining,
+            )
+            log_warning(
+                "[%s] %sCurrent quota allows processing ~%d PRs max", repo_ctx, chunk_info, max_prs
+            )
+            return False, max_prs
+
+        return True, max_prs
+
 
 # Global quota manager instance
 quota_manager = QuotaManager()
@@ -395,63 +448,6 @@ def estimate_api_calls_for_prs(pr_count: int) -> int:
     Each PR requires: timeline events, reviews, review comments, issue comments.
     """
     return pr_count * API_CALLS_PER_PR
-
-
-def check_sufficient_rate_limit(
-    estimated_calls: int, repo_ctx: str, chunk_info: str = ""
-) -> tuple[bool, int]:
-    """
-    Check if sufficient API rate limit is available using global quota tracking.
-    Does NOT make an API call - uses quota updated from response headers.
-
-    Returns (sufficient, max_prs_possible).
-    sufficient: True if we can process estimated_calls
-    max_prs_possible: Maximum PRs we could process with current quota
-    Logs appropriate messages.
-
-    chunk_info: Optional string like "Page 1: " for context
-    """
-    # Use quota manager (no API call unless not initialized)
-    remaining, limit, _ = quota_manager.get_current_quota()
-
-    if limit == 0:
-        # Quota not initialized yet - initialize it now (one-time API call)
-        log_warning("[%s] Quota not initialized, fetching current status", repo_ctx)
-        rate_info = quota_manager.initialize(get_github_token())
-        if not rate_info:
-            # Failed to get quota - cannot proceed safely
-            log_error("[%s] Failed to fetch quota, cannot verify rate limit", repo_ctx)
-            return False, 0
-        remaining = rate_info["remaining"]
-        limit = rate_info["limit"]
-
-    # Calculate max PRs we can handle
-    max_prs = quota_manager.calculate_max_prs()
-
-    # Calculate effective buffer (5% of total or fixed buffer, whichever is larger)
-    reserve = int(limit * API_QUOTA_RESERVE_PCT)
-    effective_buffer = max(API_SAFETY_BUFFER, reserve)
-
-    # Show estimated calls for this operation
-    log_info("[%s] %sEstimated API calls: ~%d", repo_ctx, chunk_info, estimated_calls)
-
-    if remaining <= (estimated_calls + effective_buffer):
-        log_error(
-            "[%s] %sInsufficient API rate limit: need ~%d calls + %d buffer "
-            "(reserve=%d), only %d available",
-            repo_ctx,
-            chunk_info,
-            estimated_calls,
-            effective_buffer,
-            reserve,
-            remaining,
-        )
-        log_warning(
-            "[%s] %sCurrent quota allows processing ~%d PRs max", repo_ctx, chunk_info, max_prs
-        )
-        return False, max_prs
-
-    return True, max_prs
 
 
 def get_github_token() -> Optional[str]:
@@ -1207,7 +1203,7 @@ def process_repository(
             # Check rate limit and truncate page if needed
             estimated_calls = estimate_api_calls_for_prs(total_prs)
             page_info_str = f"Page {page}: "
-            sufficient, max_prs = check_sufficient_rate_limit(
+            sufficient, max_prs = quota_manager.check_sufficient(
                 estimated_calls, repo_ctx, page_info_str
             )
 
@@ -1441,7 +1437,7 @@ def main() -> int:
         # Check rate limit before validating repos (1 API call per repo)
         if repos_needing_validation:
             estimated_calls = len(repos_needing_validation)
-            sufficient, _ = check_sufficient_rate_limit(estimated_calls, f"{owner}/*")
+            sufficient, _ = quota_manager.check_sufficient(estimated_calls, f"{owner}/*")
             if not sufficient:
                 log_error(
                     "Insufficient API rate limit to validate %d repositories. "

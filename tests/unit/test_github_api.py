@@ -125,42 +125,40 @@ class TestGitHubAPIClient:
 class TestFetchPRs:
     """Test PR fetching with pagination logic."""
 
-    def test_fetch_prs_stops_at_start_date(self, requests_mock):
-        """Test that fetch_pull_requests stops when PRs are before start date."""
+    def test_fetch_prs_page_stops_at_start_date(self, requests_mock):
+        """Test that fetch_pull_requests_page stops when PRs are before start date."""
         from datetime import datetime, timezone, timedelta
 
         now = datetime.now(timezone.utc)
         start_date = now - timedelta(days=7)
         end_date = now
 
-        # Mock PRs - some in range, some before start_date
-        prs_page1 = [
-            {"number": 3, "created_at": (now - timedelta(days=2)).isoformat()},
-            {"number": 2, "created_at": (now - timedelta(days=5)).isoformat()},
-        ]
-        prs_page2 = [
-            {"number": 1, "created_at": (now - timedelta(days=10)).isoformat()},  # Before start
+        # Mock PRs - some in range, some before start_date (sorted by updated_at)
+        prs_page = [
+            {"number": 3, "updated_at": (now - timedelta(days=2)).isoformat()},
+            {"number": 2, "updated_at": (now - timedelta(days=5)).isoformat()},
+            {"number": 1, "updated_at": (now - timedelta(days=10)).isoformat()},  # Before start
         ]
 
         url_base = "https://api.github.com/repos/owner/repo/pulls"
         requests_mock.get(
-            f"{url_base}?state=all&sort=created&direction=desc&per_page=100&page=1",
-            json=prs_page1,
-        )
-        requests_mock.get(
-            f"{url_base}?state=all&sort=created&direction=desc&per_page=100&page=2",
-            json=prs_page2,
+            f"{url_base}?state=all&sort=updated&direction=asc&per_page=100&page=1",
+            json=prs_page,
         )
 
-        result = gh_pr_metrics.fetch_pull_requests("owner", "repo", start_date, end_date, None)
+        result, has_more = gh_pr_metrics.fetch_pull_requests_page(
+            "owner", "repo", start_date, end_date, None, page=1
+        )
 
-        # Should only get the 2 PRs in range, and stop early
+        # Should only get the 2 PRs in range
         assert len(result) == 2
         assert result[0]["number"] == 3
         assert result[1]["number"] == 2
+        # Should indicate no more pages (stopped at start_date)
+        assert has_more is False
 
-    def test_fetch_prs_stops_at_per_page_limit(self, requests_mock):
-        """Test that fetch_pull_requests stops when fewer results than per_page returned."""
+    def test_fetch_prs_page_indicates_no_more(self, requests_mock):
+        """Test that fetch_pull_requests_page correctly indicates no more pages."""
         from datetime import datetime, timezone, timedelta
 
         now = datetime.now(timezone.utc)
@@ -169,20 +167,23 @@ class TestFetchPRs:
 
         # Mock PRs - single page with only 50 results (less than 100)
         prs = [
-            {"number": i, "created_at": (now - timedelta(days=i)).isoformat()} for i in range(1, 51)
+            {"number": i, "updated_at": (now - timedelta(days=i)).isoformat()} for i in range(1, 51)
         ]
 
         url_base = "https://api.github.com/repos/owner/repo/pulls"
         requests_mock.get(
-            f"{url_base}?state=all&sort=created&direction=desc&per_page=100&page=1",
+            f"{url_base}?state=all&sort=updated&direction=asc&per_page=100&page=1",
             json=prs,
         )
 
-        result = gh_pr_metrics.fetch_pull_requests("owner", "repo", start_date, end_date, None)
+        result, has_more = gh_pr_metrics.fetch_pull_requests_page(
+            "owner", "repo", start_date, end_date, None, page=1
+        )
 
-        # Should get all 50 PRs and stop (no page 2 request)
+        # Should get all 50 PRs
         assert len(result) == 50
-        assert len(requests_mock.request_history) == 1  # Only one request
+        # Should indicate no more pages (< 100 results)
+        assert has_more is False
 
     def test_fetch_prs_multiple_pages_in_range(self, requests_mock):
         """Test that fetch_pull_requests handles multiple pages of results."""
@@ -194,30 +195,33 @@ class TestFetchPRs:
 
         # Mock multiple pages of PRs all in range
         prs_page1 = [
-            {"number": i + 100, "created_at": (now - timedelta(days=i)).isoformat()}
+            {"number": i + 100, "updated_at": (now - timedelta(days=i)).isoformat()}
             for i in range(100)
         ]
         prs_page2 = [
-            {"number": i, "created_at": (now - timedelta(days=i + 100)).isoformat()}
+            {"number": i, "updated_at": (now - timedelta(days=i + 100)).isoformat()}
             for i in range(100)
         ]
-        prs_page3 = []  # Empty page signals end
 
         url_base = "https://api.github.com/repos/owner/repo/pulls"
         requests_mock.get(
-            f"{url_base}?state=all&sort=created&direction=desc&per_page=100&page=1",
+            f"{url_base}?state=all&sort=updated&direction=asc&per_page=100&page=1",
             json=prs_page1,
         )
         requests_mock.get(
-            f"{url_base}?state=all&sort=created&direction=desc&per_page=100&page=2",
+            f"{url_base}?state=all&sort=updated&direction=asc&per_page=100&page=2",
             json=prs_page2,
         )
         requests_mock.get(
-            f"{url_base}?state=all&sort=created&direction=desc&per_page=100&page=3",
-            json=prs_page3,
+            f"{url_base}?state=all&sort=updated&direction=desc&per_page=100&page=2",
+            json=prs_page2,
         )
 
-        result = gh_pr_metrics.fetch_pull_requests("owner", "repo", start_date, end_date, None)
+        result, has_more = gh_pr_metrics.fetch_pull_requests_page(
+            "owner", "repo", start_date, end_date, None, page=1
+        )
 
-        # Should get all PRs from both pages
-        assert len(result) == 200
+        # Should get all 100 PRs from page 1
+        assert len(result) == 100
+        # Should indicate more pages available
+        assert has_more is True

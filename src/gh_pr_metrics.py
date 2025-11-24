@@ -524,68 +524,55 @@ def make_github_request(
         raise GitHubAPIError(f"Network error: {e}")
 
 
-def fetch_pull_requests(
-    owner: str, repo: str, start_date: datetime, end_date: datetime, token: Optional[str]
-) -> List[Dict[str, Any]]:
-    """Fetch all pull requests within the date range."""
+def fetch_pull_requests_page(
+    owner: str,
+    repo: str,
+    start_date: datetime,
+    end_date: datetime,
+    token: Optional[str],
+    page: int = 1,
+    per_page: int = 100,
+) -> tuple[List[Dict[str, Any]], bool]:
+    """
+    Fetch a single page of pull requests sorted by updated date.
+    Returns (prs_in_range, has_more_pages).
+
+    PRs are sorted by updated date (newest first) to enable incremental processing.
+    has_more_pages: True if there might be more PRs to fetch
+    """
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls"
-    all_prs = []
-    page = 1
-    per_page = 100
 
-    logging.info("Fetching pull requests from %s/%s (page size: %d)", owner, repo, per_page)
+    params = {
+        "state": "all",
+        "sort": "updated",  # Sort by updated, not created
+        "direction": "asc",  # Oldest first (chronological order)
+        "page": page,
+        "per_page": per_page,
+    }
 
-    while True:
-        params = {
-            "state": "all",
-            "sort": "created",
-            "direction": "desc",
-            "page": page,
-            "per_page": per_page,
-        }
+    prs = make_github_request(url, token, params)
 
-        prs = make_github_request(url, token, params)
+    if not prs:
+        return [], False
 
-        if not prs:
-            break
+    prs_in_range = []
 
-        prs_in_page = len(prs)
-        prs_in_range = 0
+    for pr in prs:
+        updated_at = date_parser.parse(pr["updated_at"])
 
-        for pr in prs:
-            created_at = date_parser.parse(pr["created_at"])
-            # Stop if we're before the start date
-            if created_at < start_date:
-                logging.info(
-                    "Page %d: fetched %d PRs, %d in date range, %d cumulative (reached start date)",
-                    page,
-                    prs_in_page,
-                    prs_in_range,
-                    len(all_prs),
-                )
-                logging.info("Finished fetching: %d total PRs in date range", len(all_prs))
-                return all_prs
+        # Stop if we're before the start date
+        if updated_at < start_date:
+            # No more PRs will be in range
+            return prs_in_range, False
 
-            # Only include PRs within date range
-            if start_date <= created_at <= end_date:
-                all_prs.append(pr)
-                prs_in_range += 1
+        # Only include PRs within date range
+        if start_date <= updated_at <= end_date:
+            prs_in_range.append(pr)
 
-        logging.info(
-            "Page %d: fetched %d PRs, %d in date range, %d cumulative",
-            page,
-            prs_in_page,
-            prs_in_range,
-            len(all_prs),
-        )
-        page += 1
+    # If we got a full page, there might be more
+    has_more = len(prs) == per_page
 
-        # Break if we got fewer results than requested
-        if len(prs) < per_page:
-            logging.info("Finished fetching: %d total PRs in date range", len(all_prs))
-            break
-
-    return all_prs
+    return prs_in_range, has_more
 
 
 def get_ready_for_review_time(
@@ -994,10 +981,15 @@ def process_repository(
     merge_mode: bool = False,
 ) -> tuple[int, int, int]:
     """
-    Process a single repository and generate/update metrics CSV.
-    Automatically chunks large date ranges to manage API rate limits.
-    Returns (exit_code, chunks_completed, total_chunks).
-    exit_code: 0 on success, 1 on error
+    Process a single repository and generate/update metrics CSV using page-based processing.
+
+    Fetches PRs one page at a time (sorted by updated date), processes each page,
+    and checks rate limit before fetching the next page. Saves progress after each page.
+
+    Returns (exit_code, pages_completed, total_pages_fetched).
+    exit_code: 0 on success, 1 on error/stopped
+    pages_completed: Number of pages successfully processed
+    total_pages_fetched: Total pages fetched (may be more than completed if stopped mid-page)
     """
     repo_ctx = f"{owner}/{repo}"
 
@@ -1006,118 +998,71 @@ def process_repository(
         "[%s] Date range: %s to %s", repo_ctx, start_date.isoformat(), end_date.isoformat()
     )
 
-    # Calculate if chunking is needed
-    total_days = (end_date - start_date).days
-    chunks = chunk_date_range(start_date, end_date, MAX_CHUNK_DAYS)
-    total_chunks = len(chunks)
+    # Page-based processing: fetch and process one page at a time
+    page = 1
+    pages_completed = 0
+    total_pages_fetched = 0
+    last_processed_timestamp = start_date
+    per_page = 100
 
-    if total_chunks > 1:
-        logging.info(
-            "[%s] Date range spans %d days, splitting into %d chunks of up to %d days each",
-            repo_ctx,
-            total_days,
-            total_chunks,
-            MAX_CHUNK_DAYS,
-        )
+    logging.info("[%s] Fetching PRs sorted by updated date (newest first)", repo_ctx)
 
-    # Track processed PR numbers to avoid duplicate processing across chunks
-    processed_pr_numbers = set()
-    chunks_completed = 0
-
-    # Process each chunk
-    for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks, 1):
-        logging.info(
-            "[%s] Processing chunk %d/%d: %s to %s",
-            repo_ctx,
-            chunk_idx,
-            len(chunks),
-            chunk_start.isoformat(),
-            chunk_end.isoformat(),
-        )
-
-        try:
-            # Fetch PRs for this chunk
-            prs = fetch_pull_requests(owner, repo, chunk_start, chunk_end, token)
+    try:
+        while True:
+            # Fetch one page of PRs
+            prs, has_more = fetch_pull_requests_page(
+                owner, repo, start_date, end_date, token, page, per_page
+            )
+            total_pages_fetched = page
 
             if not prs:
-                logging.info(
-                    "[%s] Chunk %d/%d: No pull requests found",
-                    repo_ctx,
-                    chunk_idx,
-                    total_chunks,
-                )
-                # Update state to this chunk's end date and continue
-                update_state_file(owner, repo, chunk_end, output_file)
-                chunks_completed += 1
-                continue
+                if page == 1:
+                    logging.info(
+                        "[%s] No pull requests found in the specified date range", repo_ctx
+                    )
+                else:
+                    logging.info("[%s] Page %d: No more PRs in date range", repo_ctx, page)
+                break
 
-            # Filter out PRs already processed (due to overlap)
-            new_prs = [pr for pr in prs if pr["number"] not in processed_pr_numbers]
-            duplicate_count = len(prs) - len(new_prs)
+            total_prs = len(prs)
+            logging.info("[%s] Page %d: Found %d PRs", repo_ctx, page, total_prs)
 
-            if duplicate_count > 0:
-                logging.info(
-                    "[%s] Chunk %d/%d: Skipping %d duplicate PRs "
-                    "(already processed in previous chunk)",
-                    repo_ctx,
-                    chunk_idx,
-                    len(chunks),
-                    duplicate_count,
-                )
-
-            if not new_prs:
-                logging.info(
-                    "[%s] Chunk %d/%d: All %d PRs already processed",
-                    repo_ctx,
-                    chunk_idx,
-                    total_chunks,
-                    len(prs),
-                )
-                # Update state to this chunk's end date and continue
-                update_state_file(owner, repo, chunk_end, output_file)
-                chunks_completed += 1
-                continue
-
-            total_prs = len(new_prs)
-
-            # Check rate limit before processing
+            # Check rate limit before processing this page
             estimated_calls = estimate_api_calls_for_prs(total_prs)
-            chunk_info_str = f"Chunk {chunk_idx}/{total_chunks}: "
-            if not check_sufficient_rate_limit(estimated_calls, token, repo_ctx, chunk_info_str):
+            page_info_str = f"Page {page}: "
+            sufficient, max_prs = check_sufficient_rate_limit(
+                estimated_calls, token, repo_ctx, page_info_str
+            )
+
+            if not sufficient:
                 logging.error(
-                    "[%s] Stopping at chunk %d/%d due to insufficient rate limit",
-                    repo_ctx,
-                    chunk_idx,
-                    total_chunks,
+                    "[%s] Stopping at page %d due to insufficient rate limit", repo_ctx, page
                 )
                 logging.error(
                     "[%s] Progress saved. Resume with --update (or --update-all) "
                     "after rate limit resets.",
                     repo_ctx,
                 )
-                return 1, chunks_completed, total_chunks
+                break  # Exit while loop
 
-            # Process each PR with thread pool
+            # Process this page of PRs
             metrics = []
             completed = 0
 
             logging.info(
-                "[%s] Chunk %d/%d: Processing %d PRs with %d workers",
+                "[%s] Page %d: Processing %d PRs with %d workers",
                 repo_ctx,
-                chunk_idx,
-                len(chunks),
+                page,
                 total_prs,
                 workers,
             )
 
             with ThreadPoolExecutor(max_workers=workers) as executor:
-                # Submit all PR processing tasks (only new PRs, not duplicates)
                 future_to_pr = {
                     executor.submit(process_pr, pr, owner, repo, token, ai_bot_regex): pr
-                    for pr in new_prs
+                    for pr in prs
                 }
 
-                # Collect results as they complete
                 for future in as_completed(future_to_pr):
                     pr = future_to_pr[future]
                     completed += 1
@@ -1125,62 +1070,61 @@ def process_repository(
                     try:
                         pr_metrics = future.result()
                         metrics.append(pr_metrics)
-                        # Mark this PR as processed
-                        processed_pr_numbers.add(pr_number)
                         logging.info(
-                            "[%s] Chunk %d/%d: Completed PR %d/%d: #%d",
+                            "[%s] Page %d: Completed PR %d/%d: #%d",
                             repo_ctx,
-                            chunk_idx,
-                            len(chunks),
+                            page,
                             completed,
                             total_prs,
                             pr_number,
                         )
                     except Exception as e:
                         logging.error(
-                            "[%s] Chunk %d/%d: Failed to process PR #%d: %s",
+                            "[%s] Page %d: Failed to process PR #%d: %s",
                             repo_ctx,
-                            chunk_idx,
-                            len(chunks),
+                            page,
                             pr_number,
                             e,
                         )
-                        # Continue processing other PRs
 
-            # Write output for this chunk (always merge mode after first chunk)
-            chunk_merge_mode = merge_mode or (chunk_idx > 1)
-            write_csv_output(metrics, output_file, merge_mode=chunk_merge_mode)
+            # Write output for this page (always merge after first page)
+            page_merge_mode = merge_mode or (page > 1)
+            write_csv_output(metrics, output_file, merge_mode=page_merge_mode)
 
-            # Update state file with this chunk's end date
-            update_state_file(owner, repo, chunk_end, output_file)
-            chunks_completed += 1
-            logging.info(
-                "[%s] Chunk %d/%d: Processed %d pull requests, updated state to %s",
-                repo_ctx,
-                chunk_idx,
-                total_chunks,
-                len(metrics),
-                chunk_end.isoformat(),
-            )
+            # Find the newest updated_at timestamp from this page for resume point
+            if prs:
+                # PRs are sorted by updated asc, so last one is newest (how far we got)
+                newest_pr_updated = date_parser.parse(prs[-1]["updated_at"])
+                last_processed_timestamp = newest_pr_updated
 
-        except GitHubAPIError as e:
-            logging.error(
-                "[%s] Chunk %d/%d: GitHub API error: %s", repo_ctx, chunk_idx, total_chunks, e
-            )
-            return 1, chunks_completed, total_chunks
-        except Exception as e:
-            logging.error(
-                "[%s] Chunk %d/%d: Unexpected error: %s",
-                repo_ctx,
-                chunk_idx,
-                total_chunks,
-                e,
-                exc_info=True,
-            )
-            return 1, chunks_completed, total_chunks
+                # Update state file with the oldest timestamp from this page
+                update_state_file(owner, repo, last_processed_timestamp, output_file)
+                pages_completed += 1
 
-    logging.info("[%s] Successfully completed all %d chunks", repo_ctx, total_chunks)
-    return 0, chunks_completed, total_chunks
+                logging.info(
+                    "[%s] Page %d: Processed %d PRs, updated state to %s",
+                    repo_ctx,
+                    page,
+                    len(metrics),
+                    last_processed_timestamp.isoformat(),
+                )
+
+            # Check if there are more pages
+            if not has_more:
+                logging.info("[%s] Reached end of PR list after %d pages", repo_ctx, page)
+                break
+
+            page += 1
+
+    except GitHubAPIError as e:
+        logging.error("[%s] Page %d: GitHub API error: %s", repo_ctx, page, e)
+        return 1, pages_completed, total_pages_fetched
+    except Exception as e:
+        logging.error("[%s] Page %d: Unexpected error: %s", repo_ctx, page, e, exc_info=True)
+        return 1, pages_completed, total_pages_fetched
+
+    logging.info("[%s] Successfully completed all %d pages", repo_ctx, pages_completed)
+    return 0, pages_completed, total_pages_fetched
 
 
 def main() -> int:
@@ -1407,7 +1351,7 @@ def main() -> int:
             start_date = last_update
             end_date = datetime.now(timezone.utc)
 
-            exit_code, chunks_done, total_chunks = process_repository(
+            exit_code, pages_done, pages_fetched = process_repository(
                 owner,
                 repo,
                 csv_file,
@@ -1426,18 +1370,19 @@ def main() -> int:
                 partial_repo_info = {
                     "owner": owner,
                     "repo": repo,
-                    "chunks_done": chunks_done,
-                    "total_chunks": total_chunks,
+                    "pages_done": pages_done,
+                    "pages_fetched": pages_fetched,
                 }
                 # Count remaining repos as unprocessed
                 unprocessed_count = len(tracked_repos) - idx - 1
 
                 logging.warning(
-                    "Stopping update-all: %s/%s partially completed (%d/%d chunks)",
+                    "Stopping update-all: %s/%s partially completed "
+                    "(%d pages processed, %d pages fetched)",
                     owner,
                     repo,
-                    chunks_done,
-                    total_chunks,
+                    pages_done,
+                    pages_fetched,
                 )
                 if unprocessed_count > 0:
                     logging.warning(
@@ -1452,11 +1397,10 @@ def main() -> int:
         if partial_repo_info:
             logging.info("Completed: %d repos fully processed", completed_repos)
             logging.info(
-                "Partial: %s/%s (%d/%d chunks completed)",
+                "Partial: %s/%s (%d pages processed)",
                 partial_repo_info["owner"],
                 partial_repo_info["repo"],
-                partial_repo_info["chunks_done"],
-                partial_repo_info["total_chunks"],
+                partial_repo_info["pages_done"],
             )
             if unprocessed_count > 0:
                 logging.info("Not processed: %d repos", unprocessed_count)
@@ -1542,16 +1486,30 @@ def main() -> int:
         )
         return exit_code
     else:
-        # stdout mode - don't store state
+        # stdout mode - fetch all PRs then process (no state tracking)
         try:
-            prs = fetch_pull_requests(owner, repo, start_date, end_date, token)
+            all_prs = []
+            page = 1
 
-            if not prs:
+            while True:
+                prs, has_more = fetch_pull_requests_page(
+                    owner, repo, start_date, end_date, token, page
+                )
+
+                if prs:
+                    all_prs.extend(prs)
+
+                if not has_more:
+                    break
+
+                page += 1
+
+            if not all_prs:
                 logging.warning("No pull requests found in the specified date range")
                 return 0
 
             metrics = []
-            total_prs = len(prs)
+            total_prs = len(all_prs)
             completed = 0
 
             logging.info("Processing %d PRs with %d workers", total_prs, workers)
@@ -1559,7 +1517,7 @@ def main() -> int:
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 future_to_pr = {
                     executor.submit(process_pr, pr, owner, repo, token, args.ai_bot_regex): pr
-                    for pr in prs
+                    for pr in all_prs
                 }
 
                 for future in as_completed(future_to_pr):

@@ -1487,99 +1487,74 @@ def main() -> int:
 
         logger.info("Quota check: can process up to ~%d PRs total across all repos", max_prs)
 
-        completed_repos = 0
-        partial_repo_info = None
-        unprocessed_count = 0
+        # Process all repos from beginning - restart on any failure
+        while True:
+            completed_repos = 0
+            failed_repo = None
 
-        for idx, repo_info in enumerate(tracked_repos):
-            owner = repo_info["owner"]
-            repo = repo_info["repo"]
-            csv_file = repo_info["csv_file"]
-            last_update = repo_info["timestamp"]
+            for repo_info in tracked_repos:
+                owner = repo_info["owner"]
+                repo = repo_info["repo"]
+                csv_file = repo_info["csv_file"]
+                last_update = repo_info["timestamp"]
 
-            if not csv_file:
-                logger.warning("Skipping %s/%s: no CSV file stored in state", owner, repo)
-                unprocessed_count += 1
-                continue
-
-            logger.info("=" * 80)
-
-            start_date = last_update
-            end_date = datetime.now(timezone.utc)
-
-            exit_code, pages_done, pages_fetched = process_repository(
-                owner,
-                repo,
-                csv_file,
-                start_date,
-                end_date,
-                token,
-                workers,
-                args.ai_bot_regex,
-                merge_mode=True,
-            )
-
-            if exit_code == 0:
-                completed_repos += 1
-            else:
-                # Stopped early (likely rate limit)
-                partial_repo_info = {
-                    "owner": owner,
-                    "repo": repo,
-                    "pages_done": pages_done,
-                    "pages_fetched": pages_fetched,
-                }
-                # Count remaining repos as unprocessed
-                unprocessed_count = len(tracked_repos) - idx - 1
-
-                logger.warning(
-                    "Stopping update-all: %s/%s partially completed "
-                    "(%d pages processed, %d pages fetched)",
-                    owner,
-                    repo,
-                    pages_done,
-                    pages_fetched,
-                )
-
-                # If --wait flag set, wait for quota reset then continue
-                if args.wait:
-                    logger.info("--wait flag set, will wait for quota reset and continue")
-                    if not quota_manager.wait_for_reset():
-                        logger.error("Failed to wait for quota reset, aborting")
-                        break
-                    # Refresh quota like startup
-                    quota_manager.initialize(token)
-                    logger.info(
-                        "Quota refreshed, continuing with remaining %d repos", unprocessed_count
-                    )
-                    # Don't break - continue to next repo
-                    partial_repo_info = None  # Clear partial info since we're continuing
+                if not csv_file:
+                    logger.warning("Skipping %s/%s: no CSV file stored in state", owner, repo)
                     continue
 
-                if unprocessed_count > 0:
+                logger.info("=" * 80)
+
+                start_date = last_update
+                end_date = datetime.now(timezone.utc)
+
+                exit_code, pages_done, pages_fetched = process_repository(
+                    owner,
+                    repo,
+                    csv_file,
+                    start_date,
+                    end_date,
+                    token,
+                    workers,
+                    args.ai_bot_regex,
+                    merge_mode=True,
+                )
+
+                if exit_code == 0:
+                    completed_repos += 1
+                else:
+                    # Repo failed - record and stop this pass
+                    failed_repo = f"{owner}/{repo}"
                     logger.warning(
-                        "%d repositories not yet processed (will resume on next --update-all)",
-                        unprocessed_count,
+                        "Failed to complete %s (%d pages processed)",
+                        failed_repo,
+                        pages_done,
                     )
-                break
+                    break
 
-        logger.info("=" * 80)
+            # Check if we completed all repos
+            if failed_repo is None:
+                logger.info("=" * 80)
+                logger.info("Successfully processed all %d repositories", completed_repos)
+                return 0
 
-        # Summary output
-        if partial_repo_info:
-            logger.info("Completed: %d repos fully processed", completed_repos)
-            logger.info(
-                "Partial: %s/%s (%d pages processed)",
-                partial_repo_info["owner"],
-                partial_repo_info["repo"],
-                partial_repo_info["pages_done"],
-            )
-            if unprocessed_count > 0:
-                logger.info("Not processed: %d repos", unprocessed_count)
-            return 1  # Incomplete
-        else:
-            logger.info("Successfully processed all %d repositories", completed_repos)
-            return 0
+            # Failed at least one repo
+            if args.wait:
+                logger.info("--wait flag set, waiting for quota reset to restart from beginning")
+                if not quota_manager.wait_for_reset():
+                    logger.error("Failed to wait for quota reset, aborting")
+                    return 1
+                # Refresh quota and restart from beginning
+                quota_manager.initialize(token)
+                logger.info("Quota refreshed, restarting update-all from beginning")
+                continue  # Restart while loop
+            else:
+                logger.error(
+                    "Incomplete: processed %d repos, failed at %s. "
+                    "Use --wait to retry from beginning, or run again later.",
+                    completed_repos,
+                    failed_repo,
+                )
+                return 1
 
     # Get repository info
     owner = args.owner

@@ -54,7 +54,8 @@ class TestGitHubClient:
             },
         )
 
-        client = gh_pr_metrics.GitHubClient()
+        # Create client with quota_manager
+        client = gh_pr_metrics.GitHubClient(quota_manager=gh_pr_metrics.quota_manager)
         client.make_request(url)
 
         remaining, limit, reset = gh_pr_metrics.quota_manager.get_current_quota()

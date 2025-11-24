@@ -249,9 +249,10 @@ class StateManager:
     State file stores last update timestamp and CSV file path per repository.
     """
 
-    def __init__(self, state_file_path: Path = None):
-        """Initialize state manager with path to state file."""
+    def __init__(self, state_file_path: Path = None, logger=None):
+        """Initialize state manager with path to state file and logger."""
         self._state_file = state_file_path or STATE_FILE
+        self._logger = logger
 
     def load(self) -> Dict[str, Any]:
         """Load state file containing last update dates per repo."""
@@ -263,7 +264,8 @@ class StateManager:
                 data = yaml.safe_load(f) or {}
                 return data
         except Exception as e:
-            logger.warning("Failed to load state file %s: %s", self._state_file, e)
+            if self._logger:
+                self._logger.warning("Failed to load state file %s: %s", self._state_file, e)
             return {}
 
     def save(self, state: Dict[str, Any]) -> None:
@@ -272,9 +274,11 @@ class StateManager:
             with open(self._state_file, "w", encoding="utf-8") as f:
                 yaml.safe_dump(state, f, default_flow_style=False, sort_keys=True)
 
-            logger.debug("Saved state file to %s", self._state_file)
+            if self._logger:
+                self._logger.debug("Saved state file to %s", self._state_file)
         except Exception as e:
-            logger.error("Failed to save state file %s: %s", self._state_file, e)
+            if self._logger:
+                self._logger.error("Failed to save state file %s: %s", self._state_file, e)
             raise
 
     def get_repo_remote_url(self, owner: str, repo: str) -> str:
@@ -359,7 +363,8 @@ class StateManager:
                         timestamp = parse_timestamp(entry.get("timestamp", ""))
                         csv_file = entry.get("csv_file")
                     else:
-                        logger.warning("Skipping %s: invalid state format", repo_url)
+                        if self._logger:
+                            self._logger.warning("Skipping %s: invalid state format", repo_url)
                         continue
 
                     repos.append(
@@ -372,7 +377,8 @@ class StateManager:
                         }
                     )
             except Exception as e:
-                logger.warning("Failed to parse state entry for %s: %s", repo_url, e)
+                if self._logger:
+                    self._logger.warning("Failed to parse state entry for %s: %s", repo_url, e)
                 continue
 
         return repos
@@ -386,9 +392,11 @@ class GitHubClient:
     updates quota tracking from response headers.
     """
 
-    def __init__(self, token: Optional[str] = None):
-        """Initialize GitHub client with optional token."""
+    def __init__(self, token: Optional[str] = None, quota_manager=None, logger=None):
+        """Initialize GitHub client with optional token, quota manager, and logger."""
         self._token = token
+        self._quota_manager = quota_manager
+        self._logger = logger
 
     def make_request(self, url: str, params: Optional[Dict[str, Any]] = None) -> Any:
         """Make a GitHub API request with error handling."""
@@ -404,7 +412,8 @@ class GitHubClient:
             response.raise_for_status()
 
             # Update quota tracking from response headers
-            quota_manager.update_from_headers(response.headers)
+            if self._quota_manager:
+                self._quota_manager.update_from_headers(response.headers)
 
             return response.json()
         except requests.exceptions.HTTPError as e:
@@ -500,7 +509,8 @@ class GitHubClient:
             except GitHubAPIError as e:
                 # If org request fails with 404, try as user
                 if "not found" in str(e).lower() and is_org:
-                    logger.debug("Not an organization, trying as user: %s", owner)
+                    if self._logger:
+                        self._logger.debug("Not an organization, trying as user: %s", owner)
                     url_base = f"{GITHUB_API_BASE}/users/{owner}/repos"
                     is_org = False
                     page = 1  # Reset page counter
@@ -533,7 +543,8 @@ class GitHubClient:
             self.make_request(url)
             return True
         except GitHubAPIError as e:
-            logger.debug("Cannot access %s/%s: %s", owner, repo, e)
+            if self._logger:
+                self._logger.debug("Cannot access %s/%s: %s", owner, repo, e)
             return False
 
     def fetch_timeline_events(self, owner: str, repo: str, pr_number: int) -> List[Dict[str, Any]]:
@@ -562,6 +573,10 @@ class CSVManager:
     Handles reading existing CSV files, writing metrics data,
     and managing field definitions.
     """
+
+    def __init__(self, logger=None):
+        """Initialize CSV manager with logger."""
+        self._logger = logger
 
     def get_fieldnames(self) -> List[str]:
         """Get CSV field names in order."""
@@ -603,10 +618,12 @@ class CSVManager:
                     pr_number = int(row[PR_NUMBER_FIELD])
                     existing_data[pr_number] = row
 
-            logger.info("Loaded %d existing PRs from %s", len(existing_data), csv_file)
+            if self._logger:
+                self._logger.info("Loaded %d existing PRs from %s", len(existing_data), csv_file)
             return existing_data
         except Exception as e:
-            logger.warning("Failed to read existing CSV %s: %s", csv_file, e)
+            if self._logger:
+                self._logger.warning("Failed to read existing CSV %s: %s", csv_file, e)
             return {}
 
     def write_csv(
@@ -625,7 +642,8 @@ class CSVManager:
         If force_write is True, write headers even if metrics list is empty.
         """
         if not metrics and not force_write:
-            logger.warning("No pull requests to output")
+            if self._logger:
+                self._logger.warning("No pull requests to output")
             return
 
         fieldnames = self.get_fieldnames()
@@ -641,9 +659,10 @@ class CSVManager:
 
             # Convert back to list
             all_metrics = list(existing_data.values())
-            logger.info(
-                "Merged data: %d total PRs (%d new/updated)", len(all_metrics), len(metrics)
-            )
+            if self._logger:
+                self._logger.info(
+                    "Merged data: %d total PRs (%d new/updated)", len(all_metrics), len(metrics)
+                )
         else:
             all_metrics = metrics
 
@@ -664,10 +683,14 @@ class CSVManager:
 
                 # Atomic rename
                 os.rename(temp_path, output_file)
-                logger.info("Writing output to %s", output_file)
+                if self._logger:
+                    self._logger.info("Writing output to %s", output_file)
             except Exception as e:
                 # Keep temp file for debugging
-                logger.error("Failed to write CSV output. Temp file retained at: %s", temp_path)
+                if self._logger:
+                    self._logger.error(
+                        "Failed to write CSV output. Temp file retained at: %s", temp_path
+                    )
                 raise e
         else:
             writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
@@ -709,9 +732,9 @@ class LoggingManager:
 
 quota_manager = QuotaManager()
 logger = LoggingManager(quota_manager)
-state_manager = StateManager()
-github_client = None  # Initialized in main() with token
-csv_manager = CSVManager()
+state_manager = StateManager(logger=logger)
+github_client = None  # Initialized in main() with token, quota_manager, and logger
+csv_manager = CSVManager(logger=logger)
 
 
 # ============================================================================
@@ -1269,7 +1292,7 @@ def main() -> int:
     # Get GitHub token and initialize client
     token = get_github_token()
     global github_client
-    github_client = GitHubClient(token)
+    github_client = GitHubClient(token, quota_manager, logger)
 
     if not token:
         logger.warning(

@@ -1197,7 +1197,7 @@ def process_repository(
             total_prs = len(prs)
             log_info("[%s] Page %d: Found %d PRs", repo_ctx, page, total_prs)
 
-            # Check rate limit before processing this page
+            # Check rate limit and truncate page if needed
             estimated_calls = estimate_api_calls_for_prs(total_prs)
             page_info_str = f"Page {page}: "
             sufficient, max_prs = check_sufficient_rate_limit(
@@ -1205,15 +1205,32 @@ def process_repository(
             )
 
             if not sufficient:
-                log_error("[%s] Stopping at page %d due to insufficient rate limit", repo_ctx, page)
-                log_error(
-                    "[%s] Progress saved. Resume with --update (or --update-all) "
-                    "after rate limit resets.",
-                    repo_ctx,
-                )
-                # Note: per-page wait would require passing wait flag and token to this function
-                # Currently only supported at update-all level
-                break  # Exit while loop
+                # Can't process full page, but maybe we can process some PRs
+                if max_prs > 0:
+                    # Truncate to what we can handle
+                    prs_to_process = prs[:max_prs]
+                    log_warning(
+                        "[%s] Page %d: Truncating from %d to %d PRs due to quota limit",
+                        repo_ctx,
+                        page,
+                        total_prs,
+                        max_prs,
+                    )
+                    prs = prs_to_process
+                    total_prs = len(prs)
+                    # Will process these PRs, then stop (don't fetch more pages)
+                    has_more = False  # Force stop after this partial page
+                else:
+                    # Can't process any PRs
+                    log_error(
+                        "[%s] Stopping at page %d due to insufficient rate limit", repo_ctx, page
+                    )
+                    log_error(
+                        "[%s] Progress saved. Resume with --update (or --update-all) "
+                        "after rate limit resets.",
+                        repo_ctx,
+                    )
+                    break  # Exit while loop
 
             # Process this page of PRs
             metrics = []
@@ -1577,6 +1594,22 @@ def main() -> int:
                     pages_done,
                     pages_fetched,
                 )
+
+                # If --wait flag set, wait for quota reset then continue
+                if args.wait:
+                    log_info("--wait flag set, will wait for quota reset and continue")
+                    if not wait_for_quota_reset():
+                        log_error("Failed to wait for quota reset, aborting")
+                        break
+                    # Refresh quota like startup
+                    get_rate_limit_info(token)
+                    log_info(
+                        "Quota refreshed, continuing with remaining %d repos", unprocessed_count
+                    )
+                    # Don't break - continue to next repo
+                    partial_repo_info = None  # Clear partial info since we're continuing
+                    continue
+
                 if unprocessed_count > 0:
                     log_warning(
                         "%d repositories not yet processed (will resume on next --update-all)",

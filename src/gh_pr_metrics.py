@@ -407,8 +407,6 @@ def update_state_file(owner: str, repo: str, timestamp: datetime, csv_file: str)
     save_state_file(state)
 
 
-
-
 def estimate_api_calls_for_prs(pr_count: int) -> int:
     """
     Estimate API calls needed to process pr_count PRs.
@@ -1321,7 +1319,7 @@ def main() -> int:
         remaining = rate_info.get("remaining", "unknown")
         limit = rate_info.get("limit", "unknown")
         reset_timestamp = rate_info.get("reset", 0)
-        
+
         if reset_timestamp:
             reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
             now = datetime.now(timezone.utc)
@@ -1330,7 +1328,7 @@ def main() -> int:
             reset_str = f"{minutes_until_reset:.1f} minutes"
         else:
             reset_str = "unknown"
-        
+
         log_info(
             "Rate limit: %s/%s remaining (resets in %s)",
             remaining,

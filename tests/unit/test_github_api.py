@@ -94,6 +94,7 @@ class TestGitHubAPIClient:
         with pytest.raises(gh_pr_metrics.GitHubAPIError, match="insufficient permissions"):
             gh_pr_metrics.make_github_request(url)
 
+
 class TestFetchPRs:
     """Test PR fetching with pagination logic."""
 

@@ -38,7 +38,7 @@ class TestCSVOutput:
 
         output = io.StringIO()
         with mock.patch("sys.stdout", output):
-            gh_pr_metrics.write_csv_output(metrics, None)
+            gh_pr_metrics.csv_manager.write_csv(metrics, None)
 
         result = output.getvalue()
         assert "pr_number" in result
@@ -71,7 +71,7 @@ class TestCSVOutput:
         ]
 
         output_file = tmp_path / "test.csv"
-        gh_pr_metrics.write_csv_output(metrics, str(output_file))
+        gh_pr_metrics.csv_manager.write_csv(metrics, str(output_file))
 
         assert output_file.exists()
         content = output_file.read_text()
@@ -104,7 +104,7 @@ class TestCSVOutput:
         ]
 
         output_file = tmp_path / "test.csv"
-        gh_pr_metrics.write_csv_output(metrics, str(output_file))
+        gh_pr_metrics.csv_manager.write_csv(metrics, str(output_file))
 
         # Read back and verify CSV is valid
         with open(output_file, "r", encoding="utf-8") as f:
@@ -117,7 +117,7 @@ class TestCSVOutput:
         """Test handling of empty metrics list."""
         output = io.StringIO()
         with mock.patch("sys.stdout", output):
-            gh_pr_metrics.write_csv_output([], None)
+            gh_pr_metrics.csv_manager.write_csv([], None)
 
         result = output.getvalue()
         # Should not write anything for empty metrics
@@ -149,7 +149,7 @@ class TestCSVOutput:
         ]
 
         output_file = tmp_path / "test.csv"
-        gh_pr_metrics.write_csv_output(metrics, str(output_file))
+        gh_pr_metrics.csv_manager.write_csv(metrics, str(output_file))
 
         # Read back and verify CSV contains the timestamps
         with open(output_file, "r", encoding="utf-8") as f:
@@ -170,7 +170,7 @@ class TestCSVOutput:
             writer.writerow({"pr_number": "2", "title": "PR 2", "status": "merged"})
 
         # Read it back
-        data = gh_pr_metrics.read_existing_csv(str(csv_file))
+        data = gh_pr_metrics.csv_manager.read_csv(str(csv_file))
         assert len(data) == 2
         assert 1 in data
         assert 2 in data
@@ -180,7 +180,7 @@ class TestCSVOutput:
     def test_read_existing_csv_nonexistent(self, tmp_path):
         """Test reading non-existent CSV returns empty dict."""
         csv_file = tmp_path / "nonexistent.csv"
-        data = gh_pr_metrics.read_existing_csv(str(csv_file))
+        data = gh_pr_metrics.csv_manager.read_csv(str(csv_file))
         assert data == {}
 
     def test_write_csv_merge_mode_add_new(self, tmp_path):
@@ -210,7 +210,7 @@ class TestCSVOutput:
                 "errors": "",
             }
         ]
-        gh_pr_metrics.write_csv_output(initial_metrics, str(csv_file))
+        gh_pr_metrics.csv_manager.write_csv(initial_metrics, str(csv_file))
 
         # Add PR 2 in merge mode
         new_metrics = [
@@ -235,7 +235,7 @@ class TestCSVOutput:
                 "errors": "",
             }
         ]
-        gh_pr_metrics.write_csv_output(new_metrics, str(csv_file), merge_mode=True)
+        gh_pr_metrics.csv_manager.write_csv(new_metrics, str(csv_file), merge_mode=True)
 
         # Verify both PRs are in the file
         with open(csv_file, "r", encoding="utf-8") as f:
@@ -272,7 +272,7 @@ class TestCSVOutput:
                 "errors": "",
             }
         ]
-        gh_pr_metrics.write_csv_output(initial_metrics, str(csv_file))
+        gh_pr_metrics.csv_manager.write_csv(initial_metrics, str(csv_file))
 
         # Update PR 1 (now merged) in merge mode
         updated_metrics = [
@@ -297,7 +297,7 @@ class TestCSVOutput:
                 "errors": "",
             }
         ]
-        gh_pr_metrics.write_csv_output(updated_metrics, str(csv_file), merge_mode=True)
+        gh_pr_metrics.csv_manager.write_csv(updated_metrics, str(csv_file), merge_mode=True)
 
         # Verify PR 1 is updated
         with open(csv_file, "r", encoding="utf-8") as f:

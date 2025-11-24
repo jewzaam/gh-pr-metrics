@@ -47,12 +47,6 @@ API_CALLS_PER_PR = 4  # Estimate: timeline events, reviews, comments, review com
 API_SAFETY_BUFFER = 10  # Reserve for safety (unauthenticated limit is 60/hour total)
 API_QUOTA_RESERVE_PCT = 0.05  # Reserve 5% of total quota, don't exhaust completely
 
-# Global API quota tracking (updated from response headers, thread-safe)
-_api_quota_remaining = 0
-_api_quota_limit = 0
-_api_quota_reset = 0  # Unix timestamp when quota resets
-_quota_lock = threading.Lock()
-
 
 class GitHubAPIError(Exception):
     """Exception raised for GitHub API errors."""
@@ -60,61 +54,163 @@ class GitHubAPIError(Exception):
     pass
 
 
-def _format_quota() -> str:
-    """Format current API quota for log prefix (thread-safe read)."""
-    with _quota_lock:
-        if _api_quota_limit == 0:
-            return "[API ----/----]"
+class QuotaManager:
+    """
+    Manages GitHub API quota tracking and enforcement.
 
-        # Left-pad remaining to match length of limit
-        limit_str = str(_api_quota_limit)
-        remaining_str = str(_api_quota_remaining).rjust(len(limit_str))
-        return f"[API {remaining_str}/{limit_str}]"
+    Tracks quota from response headers, provides quota checking,
+    and supports waiting for quota reset.
+    """
+
+    def __init__(self):
+        """Initialize quota manager with zero quota."""
+        self._remaining = 0
+        self._limit = 0
+        self._reset = 0  # Unix timestamp when quota resets
+        self._lock = threading.Lock()
+
+    def get_quota_prefix(self) -> str:
+        """Get quota prefix for logging (thread-safe)."""
+        with self._lock:
+            if self._limit == 0:
+                return "[API ----/----]"
+
+            # Left-pad remaining to match length of limit
+            limit_str = str(self._limit)
+            remaining_str = str(self._remaining).rjust(len(limit_str))
+            return f"[API {remaining_str}/{limit_str}]"
+
+    def update_from_headers(self, headers: dict) -> None:
+        """Update quota tracking from API response headers (thread-safe)."""
+        remaining = headers.get("X-RateLimit-Remaining")
+        limit = headers.get("X-RateLimit-Limit")
+        reset = headers.get("X-RateLimit-Reset")
+
+        with self._lock:
+            if remaining is not None:
+                self._remaining = int(remaining)
+            if limit is not None:
+                self._limit = int(limit)
+            if reset is not None:
+                self._reset = int(reset)
+
+    def get_current_quota(self) -> tuple[int, int, int]:
+        """Get current quota (thread-safe). Returns (remaining, limit, reset)."""
+        with self._lock:
+            return self._remaining, self._limit, self._reset
+
+    def initialize(self, token: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Initialize quota by calling /rate_limit API.
+        Returns dict with 'remaining', 'limit', 'reset' keys.
+        """
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        try:
+            response = requests.get(f"{GITHUB_API_BASE}/rate_limit", headers=headers, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+
+            core = data.get("resources", {}).get("core", {})
+            remaining = core.get("remaining", 0)
+            limit = core.get("limit", 0)
+            reset = core.get("reset", 0)
+
+            # Update tracking (thread-safe)
+            with self._lock:
+                self._remaining = remaining
+                self._limit = limit
+                self._reset = reset
+
+            return {
+                "remaining": remaining,
+                "limit": limit,
+                "reset": reset,
+            }
+        except Exception as e:
+            logging.debug("Could not check rate limit: %s", e)
+            return {}
+
+    def calculate_max_prs(self) -> int:
+        """
+        Calculate maximum number of PRs processable with current quota.
+        Reserves % of total quota to avoid complete exhaustion.
+        """
+        remaining, limit, _ = self.get_current_quota()
+
+        if limit == 0:
+            return 100  # Not initialized yet, conservative default
+
+        # Reserve 5% of total quota (don't exhaust completely)
+        reserve = int(limit * API_QUOTA_RESERVE_PCT)
+        effective_buffer = max(API_SAFETY_BUFFER, reserve)
+
+        available_for_prs = max(0, remaining - effective_buffer)
+        max_prs = available_for_prs // API_CALLS_PER_PR
+
+        return max_prs
+
+    def wait_for_reset(self) -> bool:
+        """
+        Wait until API quota resets.
+        Returns True if successfully waited.
+        """
+        import time
+
+        remaining, limit, reset_timestamp = self.get_current_quota()
+
+        # Add buffer for safety
+        reset_timestamp = reset_timestamp + 15
+
+        if reset_timestamp == 0:
+            log_error("Cannot determine quota reset time (not initialized)")
+            return False
+
+        reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
+        now = datetime.now(timezone.utc)
+        wait_seconds = (reset_time - now).total_seconds()
+
+        if wait_seconds <= 0:
+            log_info("Quota already reset, refreshing...")
+            return True
+
+        wait_minutes = wait_seconds / 60
+        log_info(f"Waiting {wait_minutes:.1f} minutes for quota reset...")
+        log_info(f"Will resume at {reset_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+
+        time.sleep(wait_seconds)
+
+        log_info("Quota reset complete, refreshing quota like startup...")
+        return True
+
+
+# Global quota manager instance
+quota_manager = QuotaManager()
 
 
 def log_info(msg: str, *args, **kwargs) -> None:
     """Log INFO with API quota prefix."""
-    logging.info(f"{_format_quota()} {msg}", *args, **kwargs)
+    logging.info(f"{quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
 
 
 def log_warning(msg: str, *args, **kwargs) -> None:
     """Log WARNING with API quota prefix."""
-    logging.warning(f"{_format_quota()} {msg}", *args, **kwargs)
+    logging.warning(f"{quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
 
 
 def log_error(msg: str, *args, **kwargs) -> None:
     """Log ERROR with API quota prefix."""
-    logging.error(f"{_format_quota()} {msg}", *args, **kwargs)
+    logging.error(f"{quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
 
 
 def log_debug(msg: str, *args, **kwargs) -> None:
     """Log DEBUG with API quota prefix."""
-    logging.debug(f"{_format_quota()} {msg}", *args, **kwargs)
-
-
-def update_quota_from_headers(headers: dict) -> None:
-    """Update global quota tracking from API response headers (thread-safe)."""
-    global _api_quota_remaining, _api_quota_limit, _api_quota_reset
-
-    remaining = headers.get("X-RateLimit-Remaining")
-    limit = headers.get("X-RateLimit-Limit")
-    reset = headers.get("X-RateLimit-Reset")
-
-    with _quota_lock:
-        if remaining is not None:
-            _api_quota_remaining = int(remaining)
-        if limit is not None:
-            _api_quota_limit = int(limit)
-        if reset is not None:
-            _api_quota_reset = int(reset)
-
-
-def decrement_quota_estimate(calls: int = 1) -> None:
-    """Decrement estimated quota (called before API requests, thread-safe)."""
-    global _api_quota_remaining
-
-    with _quota_lock:
-        _api_quota_remaining = max(0, _api_quota_remaining - calls)
+    logging.debug(f"{quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
 
 
 def setup_logging(debug: bool = False) -> None:
@@ -301,31 +397,6 @@ def estimate_api_calls_for_prs(pr_count: int) -> int:
     return pr_count * API_CALLS_PER_PR
 
 
-def calculate_max_prs_for_rate_limit() -> int:
-    """
-    Calculate maximum number of PRs we can process with current rate limit.
-    Uses global quota tracking (updated from headers), doesn't make API call.
-    Reserves % of total quota to avoid complete exhaustion.
-    Returns max PRs, or 0 if rate limit exhausted.
-    """
-    # Use global quota (already updated from headers)
-    remaining = _api_quota_remaining
-    limit = _api_quota_limit
-
-    if limit == 0:
-        return 100  # Not initialized yet, conservative default
-
-    # Reserve 5% of total quota (don't exhaust completely)
-    reserve = int(limit * API_QUOTA_RESERVE_PCT)
-    # Use whichever is larger: fixed buffer or percentage reserve
-    effective_buffer = max(API_SAFETY_BUFFER, reserve)
-
-    available_for_prs = max(0, remaining - effective_buffer)
-    max_prs = available_for_prs // API_CALLS_PER_PR
-
-    return max_prs
-
-
 def check_sufficient_rate_limit(
     estimated_calls: int, repo_ctx: str, chunk_info: str = ""
 ) -> tuple[bool, int]:
@@ -340,14 +411,13 @@ def check_sufficient_rate_limit(
 
     chunk_info: Optional string like "Page 1: " for context
     """
-    # Use global quota (no API call unless not initialized)
-    remaining = _api_quota_remaining
-    limit = _api_quota_limit
+    # Use quota manager (no API call unless not initialized)
+    remaining, limit, _ = quota_manager.get_current_quota()
 
     if limit == 0:
         # Quota not initialized yet - initialize it now (one-time API call)
         log_warning("[%s] Quota not initialized, fetching current status", repo_ctx)
-        rate_info = get_rate_limit_info(get_github_token())
+        rate_info = quota_manager.initialize(get_github_token())
         if not rate_info:
             # Failed to get quota - cannot proceed safely
             log_error("[%s] Failed to fetch quota, cannot verify rate limit", repo_ctx)
@@ -356,7 +426,7 @@ def check_sufficient_rate_limit(
         limit = rate_info["limit"]
 
     # Calculate max PRs we can handle
-    max_prs = calculate_max_prs_for_rate_limit()
+    max_prs = quota_manager.calculate_max_prs()
 
     # Calculate effective buffer (5% of total or fixed buffer, whichever is larger)
     reserve = int(limit * API_QUOTA_RESERVE_PCT)
@@ -454,75 +524,12 @@ def parse_timestamp(timestamp_str: str) -> datetime:
 
 
 def get_rate_limit_info(token: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Get GitHub API rate limit information and update global quota tracking.
-    Returns dict with 'remaining', 'limit', 'reset' keys.
-    Returns empty dict on error.
-    """
+    """Get rate limit info (delegates to quota_manager)."""
+    result = quota_manager.initialize(token)
+    # Sync legacy globals
     global _api_quota_remaining, _api_quota_limit, _api_quota_reset
-
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    try:
-        response = requests.get(f"{GITHUB_API_BASE}/rate_limit", headers=headers, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-
-        core = data.get("resources", {}).get("core", {})
-        remaining = core.get("remaining", 0)
-        limit = core.get("limit", 0)
-        reset = core.get("reset", 0)
-
-        # Update global tracking (thread-safe)
-        with _quota_lock:
-            _api_quota_remaining = remaining
-            _api_quota_limit = limit
-            _api_quota_reset = reset
-
-        return {
-            "remaining": remaining,
-            "limit": limit,
-            "reset": reset,
-        }
-    except Exception as e:
-        log_debug("Could not check rate limit: %s", e)
-        return {}
-
-
-def wait_for_quota_reset() -> bool:
-    """
-    Wait until API quota resets using globally tracked reset timestamp.
-    Returns True if successfully waited, False if unable to determine reset time.
-    """
-    import time
-
-    reset_timestamp = _api_quota_reset + 15  # Add 15 seconds to be safe
-
-    if reset_timestamp == 0:
-        log_error("Cannot determine quota reset time (not initialized)")
-        return False
-
-    reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
-    now = datetime.now(timezone.utc)
-    wait_seconds = (reset_time - now).total_seconds()
-
-    if wait_seconds <= 0:
-        log_info("Quota already reset, refreshing...")
-        return True
-
-    wait_minutes = wait_seconds / 60
-    log_info(f"Waiting {wait_minutes:.1f} minutes for quota reset...")
-    log_info(f"Will resume at {reset_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-
-    time.sleep(wait_seconds)
-
-    log_info("Quota reset complete, refreshing quota like startup...")
-    return True
+    _api_quota_remaining, _api_quota_limit, _api_quota_reset = quota_manager.get_current_quota()
+    return result
 
 
 def check_rate_limit(token: Optional[str] = None) -> None:
@@ -635,8 +642,8 @@ def make_github_request(
         response = requests.get(url, headers=headers, params=params, timeout=30)
         response.raise_for_status()
 
-        # Update global quota tracking from response headers
-        update_quota_from_headers(response.headers)
+        # Update quota tracking from response headers
+        quota_manager.update_from_headers(response.headers)
 
         return response.json()
     except requests.exceptions.HTTPError as e:
@@ -1144,7 +1151,7 @@ def process_repository(
     log_info("[%s] Date range: %s to %s", repo_ctx, start_date.isoformat(), end_date.isoformat())
 
     # Check quota before starting any work
-    max_prs_can_process = calculate_max_prs_for_rate_limit()
+    max_prs_can_process = quota_manager.calculate_max_prs()
     if max_prs_can_process == 0:
         log_error(
             "[%s] Cannot process any PRs with current quota (exhausted or below reserve)",
@@ -1518,19 +1525,20 @@ def main() -> int:
         log_info("Updating %d tracked repositories", len(tracked_repos))
 
         # Check quota before starting update-all
-        max_prs = calculate_max_prs_for_rate_limit()
+        max_prs = quota_manager.calculate_max_prs()
         if max_prs == 0:
+            remaining, limit, _ = quota_manager.get_current_quota()
             log_error(
                 "Cannot start update-all: quota exhausted or below reserve (%d/%d remaining)",
-                _api_quota_remaining,
-                _api_quota_limit,
+                remaining,
+                limit,
             )
             if args.wait:
-                if not wait_for_quota_reset():
+                if not quota_manager.wait_for_reset():
                     return 1
                 # After waiting, refresh quota like startup
-                get_rate_limit_info(token)
-                max_prs = calculate_max_prs_for_rate_limit()
+                quota_manager.initialize(token)
+                max_prs = quota_manager.calculate_max_prs()
                 if max_prs == 0:
                     log_error("Quota still exhausted after reset, aborting")
                     return 1
@@ -1598,11 +1606,11 @@ def main() -> int:
                 # If --wait flag set, wait for quota reset then continue
                 if args.wait:
                     log_info("--wait flag set, will wait for quota reset and continue")
-                    if not wait_for_quota_reset():
+                    if not quota_manager.wait_for_reset():
                         log_error("Failed to wait for quota reset, aborting")
                         break
                     # Refresh quota like startup
-                    get_rate_limit_info(token)
+                    quota_manager.initialize(token)
                     log_info(
                         "Quota refreshed, continuing with remaining %d repos", unprocessed_count
                     )

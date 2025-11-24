@@ -2,8 +2,22 @@
 """Tests for date range chunking and rate limit handling."""
 
 from datetime import datetime, timedelta, timezone
+import pytest
 
 import gh_pr_metrics
+
+
+@pytest.fixture(autouse=True)
+def reset_quota_manager():
+    """Reset quota manager before each test to prevent state pollution."""
+    gh_pr_metrics.quota_manager._remaining = 0
+    gh_pr_metrics.quota_manager._limit = 0
+    gh_pr_metrics.quota_manager._reset = 0
+    yield
+    # Cleanup after test
+    gh_pr_metrics.quota_manager._remaining = 0
+    gh_pr_metrics.quota_manager._limit = 0
+    gh_pr_metrics.quota_manager._reset = 0
 
 
 class TestChunking:
@@ -172,8 +186,8 @@ class TestRateLimitHandling:
     def test_check_sufficient_rate_limit_insufficient_quota(self):
         """Test rate limit check when insufficient quota."""
         # Set global quota (insufficient)
-        gh_pr_metrics._api_quota_limit = 5000
-        gh_pr_metrics._api_quota_remaining = 100  # Not enough for 400 + buffer
+        gh_pr_metrics.quota_manager.__limit = 5000
+        gh_pr_metrics.quota_manager.__remaining = 100  # Not enough for 400 + buffer
 
         # Should return (False, max_prs) when insufficient
         sufficient, max_prs = gh_pr_metrics.check_sufficient_rate_limit(
@@ -185,8 +199,8 @@ class TestRateLimitHandling:
     def test_check_sufficient_rate_limit_at_boundary(self):
         """Test rate limit check at exact boundary."""
         # With API_SAFETY_BUFFER=10, test at boundary
-        gh_pr_metrics._api_quota_remaining = 410  # Exactly 400 + 10 buffer
-        gh_pr_metrics._api_quota_limit = 5000
+        gh_pr_metrics.quota_manager.__remaining = 410  # Exactly 400 + 10 buffer
+        gh_pr_metrics.quota_manager.__limit = 5000
 
         # At boundary (remaining = estimated + buffer), should return (False, max_prs)
         sufficient, max_prs = gh_pr_metrics.check_sufficient_rate_limit(
@@ -200,8 +214,8 @@ class TestRateLimitHandling:
     def test_check_sufficient_rate_limit_just_above_boundary(self):
         """Test rate limit check just above boundary with 5% reserve."""
         # With 5% reserve of 5000 = 250 (larger than API_SAFETY_BUFFER=10)
-        gh_pr_metrics._api_quota_limit = 5000
-        gh_pr_metrics._api_quota_remaining = 651  # One more than 400 + 250 buffer
+        gh_pr_metrics.quota_manager._limit = 5000
+        gh_pr_metrics.quota_manager._remaining = 651  # One more than 400 + 250 buffer
 
         # Should return (True, max_prs) (remaining > estimated + buffer)
         sufficient, max_prs = gh_pr_metrics.check_sufficient_rate_limit(
@@ -213,8 +227,8 @@ class TestRateLimitHandling:
     def test_check_sufficient_rate_limit_not_initialized(self, requests_mock):
         """Test rate limit check when quota not initialized (lazy initialization)."""
         # Reset global quota to uninitialized state
-        gh_pr_metrics._api_quota_limit = 0
-        gh_pr_metrics._api_quota_remaining = 0
+        gh_pr_metrics.quota_manager.__limit = 0
+        gh_pr_metrics.quota_manager.__remaining = 0
 
         # Mock successful quota fetch
         requests_mock.get(

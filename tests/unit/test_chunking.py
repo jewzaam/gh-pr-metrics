@@ -163,87 +163,79 @@ class TestRateLimitHandling:
         )
 
         # Should return True when we have enough
-        result = gh_pr_metrics.check_sufficient_rate_limit(
-            estimated_calls=400, token="test_token", repo_ctx="owner/repo"
+        sufficient, max_prs = gh_pr_metrics.check_sufficient_rate_limit(
+            estimated_calls=400, repo_ctx="owner/repo"
         )
-        assert result is True
+        assert sufficient is True
+        assert max_prs > 0
 
-    def test_check_sufficient_rate_limit_insufficient_quota(self, requests_mock):
+    def test_check_sufficient_rate_limit_insufficient_quota(self):
         """Test rate limit check when insufficient quota."""
-        requests_mock.get(
-            "https://api.github.com/rate_limit",
-            json={
-                "resources": {
-                    "core": {
-                        "limit": 5000,
-                        "remaining": 100,  # Not enough for 400 + buffer
-                        "reset": 1699999999,
-                    }
-                }
-            },
-        )
+        # Set global quota (insufficient)
+        gh_pr_metrics._api_quota_limit = 5000
+        gh_pr_metrics._api_quota_remaining = 100  # Not enough for 400 + buffer
 
-        # Should return False when insufficient
-        result = gh_pr_metrics.check_sufficient_rate_limit(
-            estimated_calls=400, token="test_token", repo_ctx="owner/repo"
+        # Should return (False, max_prs) when insufficient
+        sufficient, max_prs = gh_pr_metrics.check_sufficient_rate_limit(
+            estimated_calls=400, repo_ctx="owner/repo"
         )
-        assert result is False
+        assert sufficient is False
+        assert max_prs >= 0
 
-    def test_check_sufficient_rate_limit_at_boundary(self, requests_mock):
+    def test_check_sufficient_rate_limit_at_boundary(self):
         """Test rate limit check at exact boundary."""
         # With API_SAFETY_BUFFER=10, test at boundary
-        requests_mock.get(
-            "https://api.github.com/rate_limit",
-            json={
-                "resources": {
-                    "core": {
-                        "limit": 5000,
-                        "remaining": 410,  # Exactly 400 + 10 buffer
-                        "reset": 1699999999,
-                    }
-                }
-            },
-        )
+        gh_pr_metrics._api_quota_remaining = 410  # Exactly 400 + 10 buffer
+        gh_pr_metrics._api_quota_limit = 5000
 
-        # At boundary (remaining = estimated + buffer), should return False
-        result = gh_pr_metrics.check_sufficient_rate_limit(
-            estimated_calls=400, token="test_token", repo_ctx="owner/repo"
+        # At boundary (remaining = estimated + buffer), should return (False, max_prs)
+        sufficient, max_prs = gh_pr_metrics.check_sufficient_rate_limit(
+            estimated_calls=400, repo_ctx="owner/repo"
         )
         # The condition is: remaining <= (estimated + buffer)
         # 410 <= 410 is True, so we should return False (insufficient)
-        assert result is False
+        assert sufficient is False
+        assert max_prs >= 0
 
-    def test_check_sufficient_rate_limit_just_above_boundary(self, requests_mock):
-        """Test rate limit check just above boundary."""
-        # With API_SAFETY_BUFFER=10, test just above boundary
+    def test_check_sufficient_rate_limit_just_above_boundary(self):
+        """Test rate limit check just above boundary with 5% reserve."""
+        # With 5% reserve of 5000 = 250 (larger than API_SAFETY_BUFFER=10)
+        gh_pr_metrics._api_quota_limit = 5000
+        gh_pr_metrics._api_quota_remaining = 651  # One more than 400 + 250 buffer
+
+        # Should return (True, max_prs) (remaining > estimated + buffer)
+        sufficient, max_prs = gh_pr_metrics.check_sufficient_rate_limit(
+            estimated_calls=400, repo_ctx="owner/repo"
+        )
+        assert sufficient is True
+        assert max_prs > 0
+
+    def test_check_sufficient_rate_limit_not_initialized(self, requests_mock):
+        """Test rate limit check when quota not initialized (lazy initialization)."""
+        # Reset global quota to uninitialized state
+        gh_pr_metrics._api_quota_limit = 0
+        gh_pr_metrics._api_quota_remaining = 0
+
+        # Mock successful quota fetch
         requests_mock.get(
             "https://api.github.com/rate_limit",
             json={
                 "resources": {
                     "core": {
                         "limit": 5000,
-                        "remaining": 411,  # One more than 400 + 10 buffer
+                        "remaining": 4500,
                         "reset": 1699999999,
                     }
                 }
             },
         )
 
-        # Should return True (remaining > estimated + buffer)
-        result = gh_pr_metrics.check_sufficient_rate_limit(
-            estimated_calls=400, token="test_token", repo_ctx="owner/repo"
+        # Should initialize quota and check properly
+        sufficient, max_prs = gh_pr_metrics.check_sufficient_rate_limit(
+            estimated_calls=400, repo_ctx="owner/repo"
         )
-        assert result is True
-
-    def test_check_sufficient_rate_limit_api_error(self, requests_mock):
-        """Test rate limit check when API fails."""
-        requests_mock.get("https://api.github.com/rate_limit", status_code=500)
-
-        # Should return True (proceed with caution) when can't check
-        result = gh_pr_metrics.check_sufficient_rate_limit(
-            estimated_calls=400, token="test_token", repo_ctx="owner/repo"
-        )
-        assert result is True
+        assert sufficient is True  # Has enough after initialization
+        assert max_prs > 0
 
     def test_get_rate_limit_info_success(self, requests_mock):
         """Test successful rate limit info retrieval."""

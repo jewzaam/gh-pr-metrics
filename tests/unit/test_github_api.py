@@ -94,34 +94,6 @@ class TestGitHubAPIClient:
         with pytest.raises(gh_pr_metrics.GitHubAPIError, match="insufficient permissions"):
             gh_pr_metrics.make_github_request(url)
 
-    def test_check_rate_limit(self, requests_mock):
-        """Test rate limit status check."""
-        url = "https://api.github.com/rate_limit"
-        requests_mock.get(
-            url,
-            json={
-                "resources": {
-                    "core": {
-                        "limit": 5000,
-                        "remaining": 4999,
-                        "reset": 1699999999,
-                    }
-                }
-            },
-        )
-
-        # Should not raise any exceptions
-        gh_pr_metrics.check_rate_limit(token="test_token")
-
-    def test_check_rate_limit_handles_errors(self, requests_mock):
-        """Test that rate limit check handles errors gracefully."""
-        url = "https://api.github.com/rate_limit"
-        requests_mock.get(url, status_code=500)
-
-        # Should not raise - should handle gracefully
-        gh_pr_metrics.check_rate_limit(token="test_token")
-
-
 class TestFetchPRs:
     """Test PR fetching with pagination logic."""
 

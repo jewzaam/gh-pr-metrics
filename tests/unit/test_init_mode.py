@@ -64,6 +64,20 @@ class TestInitMode:
         state_file = tmp_path / "state.yaml"
         csv_file = tmp_path / "test.csv"
 
+        # Mock rate limit check at startup
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={
+                "resources": {
+                    "core": {
+                        "limit": 5000,
+                        "remaining": 4999,
+                        "reset": 1699999999,
+                    }
+                }
+            },
+        )
+
         # Mock repo validation
         requests_mock.get(
             "https://api.github.com/repos/testowner/testrepo",
@@ -103,6 +117,20 @@ class TestInitMode:
         state_file = tmp_path / "state.yaml"
         output_dir = tmp_path / "data"
         output_pattern = str(output_dir / "{owner}-{repo}.csv")
+
+        # Mock rate limit check at startup
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={
+                "resources": {
+                    "core": {
+                        "limit": 5000,
+                        "remaining": 4999,
+                        "reset": 1699999999,
+                    }
+                }
+            },
+        )
 
         # Mock listing repos
         requests_mock.get(
@@ -164,6 +192,20 @@ class TestInitMode:
         output_dir = tmp_path / "data"
         output_pattern = str(output_dir / "{owner}-{repo}.csv")
 
+        # Mock rate limit check at startup
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={
+                "resources": {
+                    "core": {
+                        "limit": 5000,
+                        "remaining": 4999,
+                        "reset": 1699999999,
+                    }
+                }
+            },
+        )
+
         # Mock listing repos
         requests_mock.get(
             "https://api.github.com/orgs/testowner/repos",
@@ -224,6 +266,20 @@ class TestInitMode:
             f"  timestamp: '2024-01-01T00:00:00'\n"
         )
 
+        # Mock rate limit check at startup
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={
+                "resources": {
+                    "core": {
+                        "limit": 5000,
+                        "remaining": 4999,
+                        "reset": 1699999999,
+                    }
+                }
+            },
+        )
+
         # Mock listing repos
         requests_mock.get(
             "https://api.github.com/orgs/testowner/repos",
@@ -269,6 +325,20 @@ class TestInitMode:
         """Test that init uses default start date when --start not provided."""
         state_file = tmp_path / "state.yaml"
         csv_file = tmp_path / "test.csv"
+
+        # Mock rate limit check at startup
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={
+                "resources": {
+                    "core": {
+                        "limit": 5000,
+                        "remaining": 4999,
+                        "reset": 1699999999,
+                    }
+                }
+            },
+        )
 
         # Mock repo validation
         requests_mock.get(

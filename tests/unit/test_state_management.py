@@ -51,29 +51,6 @@ class TestStateManagement:
             assert "2024-01-01T00:00:00" in content
             assert "metrics.csv" in content
 
-    def test_get_last_update_date_exists(self, tmp_path):
-        """Test getting last update date when it exists."""
-        state_file = tmp_path / "state.yaml"
-        state_file.write_text(
-            "https://github.com/owner/repo:\n  csv_file: metrics.csv\n"
-            "  timestamp: '2024-01-01T00:00:00'\n"
-        )
-
-        with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
-            last_update = gh_pr_metrics.get_last_update_date("owner", "repo")
-            assert last_update is not None
-            assert last_update.year == 2024
-            assert last_update.month == 1
-            assert last_update.day == 1
-
-    def test_get_last_update_date_not_exists(self, tmp_path):
-        """Test getting last update date when it doesn't exist."""
-        state_file = tmp_path / "state.yaml"
-
-        with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
-            last_update = gh_pr_metrics.get_last_update_date("owner", "repo")
-            assert last_update is None
-
     def test_update_state_file(self, tmp_path):
         """Test updating state file with new timestamp."""
         state_file = tmp_path / "state.yaml"

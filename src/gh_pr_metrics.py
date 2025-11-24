@@ -357,12 +357,6 @@ def get_repo_state(owner: str, repo: str) -> Optional[Dict[str, Any]]:
     return {"timestamp": timestamp, "csv_file": csv_file}
 
 
-def get_last_update_date(owner: str, repo: str) -> Optional[datetime]:
-    """Get last update date for a repository from state file."""
-    repo_state = get_repo_state(owner, repo)
-    return repo_state["timestamp"] if repo_state else None
-
-
 def get_all_tracked_repos() -> List[Dict[str, Any]]:
     """
     Get all tracked repositories from state file.
@@ -413,33 +407,6 @@ def update_state_file(owner: str, repo: str, timestamp: datetime, csv_file: str)
     save_state_file(state)
 
 
-def chunk_date_range(
-    start_date: datetime, end_date: datetime, max_days: int = MAX_CHUNK_DAYS
-) -> List[tuple[datetime, datetime]]:
-    """
-    Split a date range into chunks of max_days with 1-day overlap.
-    Returns list of (chunk_start, chunk_end) tuples.
-
-    Overlap ensures no PRs are missed due to timestamp precision.
-    Duplicates are handled by CSV merge (PR number deduplication).
-    """
-    chunks = []
-    current_start = start_date
-
-    while current_start < end_date:
-        # Calculate chunk end (either max_days from start or end_date, whichever is earlier)
-        chunk_end = min(current_start + timedelta(days=max_days), end_date)
-        chunks.append((current_start, chunk_end))
-
-        # Next chunk starts 1 day before this chunk ended (overlap to prevent gaps)
-        # Duplicates will be deduplicated by PR number during CSV merge
-        current_start = chunk_end - timedelta(days=1)
-
-        # Ensure we don't create infinite loops if chunk_end == end_date
-        if chunk_end >= end_date:
-            break
-
-    return chunks
 
 
 def estimate_api_calls_for_prs(pr_count: int) -> int:
@@ -517,43 +484,6 @@ def parse_timestamp(timestamp_str: str) -> datetime:
             return dt
         except (ValueError, TypeError) as e:
             raise ValueError(f"Invalid timestamp format: {timestamp_str}") from e
-
-
-def get_rate_limit_info(token: Optional[str] = None) -> Dict[str, Any]:
-    """Get rate limit info (delegates to quota_manager)."""
-    result = quota_manager.initialize(token)
-    # Sync legacy globals
-    global _api_quota_remaining, _api_quota_limit, _api_quota_reset
-    _api_quota_remaining, _api_quota_limit, _api_quota_reset = quota_manager.get_current_quota()
-    return result
-
-
-def check_rate_limit(token: Optional[str] = None) -> None:
-    """Check and display current GitHub API rate limit status."""
-    rate_info = get_rate_limit_info(token)
-
-    if not rate_info:
-        return
-
-    remaining = rate_info.get("remaining", "unknown")
-    limit = rate_info.get("limit", "unknown")
-    reset_timestamp = rate_info.get("reset", 0)
-
-    if reset_timestamp:
-        reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
-        now = datetime.now(timezone.utc)
-        time_until_reset = reset_time - now
-        minutes_until_reset = time_until_reset.total_seconds() / 60
-        reset_str = f"{minutes_until_reset:.1f} minutes"
-    else:
-        reset_str = "unknown"
-
-    log_info(
-        "Rate limit: %s/%s remaining (resets in %s)",
-        remaining,
-        limit,
-        reset_str,
-    )
 
 
 def list_owner_repos(owner: str, token: Optional[str] = None) -> List[str]:
@@ -1149,6 +1079,7 @@ def process_repository(
     # Check quota before starting any work
     max_prs_can_process = quota_manager.calculate_max_prs()
     if max_prs_can_process == 0:
+        remaining, limit, _ = quota_manager.get_current_quota()
         log_error(
             "[%s] Cannot process any PRs with current quota (exhausted or below reserve)",
             repo_ctx,
@@ -1156,8 +1087,8 @@ def process_repository(
         log_error(
             "[%s] Current quota: %d/%d remaining",
             repo_ctx,
-            _api_quota_remaining,
-            _api_quota_limit,
+            remaining,
+            limit,
         )
         # Note: per-repo wait not implemented, only at update-all level
         return 1, 0, 0
@@ -1385,7 +1316,27 @@ def main() -> int:
         workers = args.workers
 
     # Check and display rate limit status
-    check_rate_limit(token)
+    rate_info = quota_manager.initialize(token)
+    if rate_info:
+        remaining = rate_info.get("remaining", "unknown")
+        limit = rate_info.get("limit", "unknown")
+        reset_timestamp = rate_info.get("reset", 0)
+        
+        if reset_timestamp:
+            reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
+            now = datetime.now(timezone.utc)
+            time_until_reset = reset_time - now
+            minutes_until_reset = time_until_reset.total_seconds() / 60
+            reset_str = f"{minutes_until_reset:.1f} minutes"
+        else:
+            reset_str = "unknown"
+        
+        log_info(
+            "Rate limit: %s/%s remaining (resets in %s)",
+            remaining,
+            limit,
+            reset_str,
+        )
 
     # Handle init mode
     if args.init:

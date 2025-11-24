@@ -378,183 +378,17 @@ class StateManager:
         return repos
 
 
-# Global manager instances
+# ============================================================================
+# Global Manager Instances
+# ============================================================================
+
 quota_manager = QuotaManager()
 state_manager = StateManager()
 
 
-def log_info(msg: str, *args, **kwargs) -> None:
-    """Log INFO with API quota prefix."""
-    logging.info(f"{quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
-
-
-def log_warning(msg: str, *args, **kwargs) -> None:
-    """Log WARNING with API quota prefix."""
-    logging.warning(f"{quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
-
-
-def log_error(msg: str, *args, **kwargs) -> None:
-    """Log ERROR with API quota prefix."""
-    logging.error(f"{quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
-
-
-def log_debug(msg: str, *args, **kwargs) -> None:
-    """Log DEBUG with API quota prefix."""
-    logging.debug(f"{quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
-
-
-def setup_logging(debug: bool = False) -> None:
-    """Configure logging based on debug flag."""
-    level = logging.DEBUG if debug else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        stream=sys.stderr,
-    )
-
-
-def estimate_api_calls_for_prs(pr_count: int) -> int:
-    """
-    Estimate API calls needed to process pr_count PRs.
-    Each PR requires: timeline events, reviews, review comments, issue comments.
-    """
-    return pr_count * API_CALLS_PER_PR
-
-
-def get_github_token() -> Optional[str]:
-    """Get GitHub token from environment."""
-    return os.getenv("GITHUB_TOKEN")
-
-
-def get_repo_from_git() -> tuple[Optional[str], Optional[str]]:
-    """
-    Get repository owner and name from git config.
-    Returns (owner, repo) or (None, None) if not found.
-    """
-    try:
-        remote_url = subprocess.check_output(
-            ["git", "config", "--get", "remote.origin.url"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-
-        # Parse SSH URL (git@github.com:owner/repo.git)
-        if remote_url.startswith("git@"):
-            _, path = remote_url.split(":", 1)
-        # Parse HTTPS URL (https://github.com/owner/repo.git)
-        elif remote_url.startswith("https://"):
-            parts = remote_url.split("/")
-            if len(parts) >= 5:
-                path = f"{parts[3]}/{parts[4]}"
-            else:
-                return None, None
-        else:
-            return None, None
-
-        # Remove .git suffix
-        if path.endswith(".git"):
-            path = path[:-4]
-
-        owner, repo = path.split("/", 1)
-        return owner, repo
-    except Exception as e:
-        log_debug("Failed to get repo from git: %s", e)
-        return None, None
-
-
-def parse_timestamp(timestamp_str: str) -> datetime:
-    """
-    Parse various timestamp formats to datetime (always returns timezone-aware).
-
-    Raises ValueError with clear message if timestamp cannot be parsed.
-    """
-    if not timestamp_str or not timestamp_str.strip():
-        raise ValueError("Timestamp string is empty or None")
-
-    try:
-        # Try Unix timestamp first
-        dt = datetime.fromtimestamp(float(timestamp_str))
-        # Make timezone-aware if naive
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except (ValueError, OverflowError):
-        try:
-            # Try ISO 8601 / RFC 3339
-            dt = date_parser.parse(timestamp_str)
-            # Make timezone-aware if naive
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
-        except (ValueError, TypeError) as e:
-            raise ValueError(f"Invalid timestamp format: {timestamp_str}") from e
-
-
-def list_owner_repos(owner: str, token: Optional[str] = None) -> List[str]:
-    """
-    List all repositories for an owner (user or organization).
-    Returns list of repository names.
-    """
-    repos = []
-    page = 1
-    per_page = 100
-
-    # Try as organization first
-    url_base = f"{GITHUB_API_BASE}/orgs/{owner}/repos"
-    is_org = True
-
-    while True:
-        params = {"page": page, "per_page": per_page, "type": "all"}
-
-        try:
-            response = make_github_request(url_base, token, params)
-        except GitHubAPIError as e:
-            # If org request fails with 404, try as user
-            if "not found" in str(e).lower() and is_org:
-                log_debug("Not an organization, trying as user: %s", owner)
-                url_base = f"{GITHUB_API_BASE}/users/{owner}/repos"
-                is_org = False
-                page = 1  # Reset page counter
-                continue
-            else:
-                raise
-
-        if not response:
-            break
-
-        for repo in response:
-            repos.append(repo["name"])
-
-        # Break if we got fewer results than requested
-        if len(response) < per_page:
-            break
-
-        page += 1
-
-    return repos
-
-
-def validate_repo_access(owner: str, repo: str, token: Optional[str] = None) -> bool:
-    """
-    Validate that we have access to a repository.
-    Returns True if accessible, False otherwise.
-    """
-    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}"
-
-    try:
-        make_github_request(url, token)
-        return True
-    except GitHubAPIError as e:
-        log_debug("Cannot access %s/%s: %s", owner, repo, e)
-        return False
-
-
-def expand_output_pattern(pattern: str, owner: str, repo: str) -> str:
-    """
-    Expand output pattern with owner and repo placeholders.
-    Supports {owner} and {repo} placeholders.
-    """
-    return pattern.replace("{owner}", owner).replace("{repo}", repo)
+# ============================================================================
+# GitHub API Functions
+# ============================================================================
 
 
 def make_github_request(
@@ -652,6 +486,70 @@ def fetch_pull_requests_page(
     has_more = len(prs) == per_page
 
     return prs_in_range, has_more
+
+
+def list_owner_repos(owner: str, token: Optional[str] = None) -> List[str]:
+    """
+    List all repositories for an owner (user or organization).
+    Returns list of repository names.
+    """
+    repos = []
+    page = 1
+    per_page = 100
+
+    # Try as organization first
+    url_base = f"{GITHUB_API_BASE}/orgs/{owner}/repos"
+    is_org = True
+
+    while True:
+        params = {"page": page, "per_page": per_page, "type": "all"}
+
+        try:
+            response = make_github_request(url_base, token, params)
+        except GitHubAPIError as e:
+            # If org request fails with 404, try as user
+            if "not found" in str(e).lower() and is_org:
+                log_debug("Not an organization, trying as user: %s", owner)
+                url_base = f"{GITHUB_API_BASE}/users/{owner}/repos"
+                is_org = False
+                page = 1  # Reset page counter
+                continue
+            else:
+                raise
+
+        if not response:
+            break
+
+        for repo in response:
+            repos.append(repo["name"])
+
+        # Break if we got fewer results than requested
+        if len(response) < per_page:
+            break
+
+        page += 1
+
+    return repos
+
+
+def validate_repo_access(owner: str, repo: str, token: Optional[str] = None) -> bool:
+    """
+    Validate that we have access to a repository.
+    Returns True if accessible, False otherwise.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}"
+
+    try:
+        make_github_request(url, token)
+        return True
+    except GitHubAPIError as e:
+        log_debug("Cannot access %s/%s: %s", owner, repo, e)
+        return False
+
+
+# ============================================================================
+# PR Processing Functions
+# ============================================================================
 
 
 def get_ready_for_review_time(
@@ -859,6 +757,11 @@ def process_pr(
     return metrics
 
 
+# ============================================================================
+# CSV I/O Functions
+# ============================================================================
+
+
 def read_existing_csv(csv_file: str) -> Dict[int, Dict[str, Any]]:
     """
     Read existing CSV file and return dict keyed by PR number.
@@ -963,6 +866,11 @@ def write_csv_output(
         writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(all_metrics)
+
+
+# ============================================================================
+# Main Business Logic
+# ============================================================================
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -1725,6 +1633,126 @@ def main() -> int:
         except Exception as e:
             log_error("Unexpected error: %s", e, exc_info=args.debug)
             return 1
+
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+
+def log_info(msg: str, *args, **kwargs) -> None:
+    """Log INFO with API quota prefix."""
+    logging.info(f"{quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
+
+
+def log_warning(msg: str, *args, **kwargs) -> None:
+    """Log WARNING with API quota prefix."""
+    logging.warning(f"{quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
+
+
+def log_error(msg: str, *args, **kwargs) -> None:
+    """Log ERROR with API quota prefix."""
+    logging.error(f"{quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
+
+
+def log_debug(msg: str, *args, **kwargs) -> None:
+    """Log DEBUG with API quota prefix."""
+    logging.debug(f"{quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
+
+
+def setup_logging(debug: bool = False) -> None:
+    """Configure logging based on debug flag."""
+    level = logging.DEBUG if debug else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        stream=sys.stderr,
+    )
+
+
+def estimate_api_calls_for_prs(pr_count: int) -> int:
+    """
+    Estimate API calls needed to process pr_count PRs.
+    Each PR requires: timeline events, reviews, review comments, issue comments.
+    """
+    return pr_count * API_CALLS_PER_PR
+
+
+def get_github_token() -> Optional[str]:
+    """Get GitHub token from environment."""
+    return os.getenv("GITHUB_TOKEN")
+
+
+def get_repo_from_git() -> tuple[Optional[str], Optional[str]]:
+    """
+    Get repository owner and name from git config.
+    Returns (owner, repo) or (None, None) if not found.
+    """
+    try:
+        remote_url = subprocess.check_output(
+            ["git", "config", "--get", "remote.origin.url"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+
+        # Parse SSH URL (git@github.com:owner/repo.git)
+        if remote_url.startswith("git@"):
+            _, path = remote_url.split(":", 1)
+        # Parse HTTPS URL (https://github.com/owner/repo.git)
+        elif remote_url.startswith("https://"):
+            parts = remote_url.split("/")
+            if len(parts) >= 5:
+                path = f"{parts[3]}/{parts[4]}"
+            else:
+                return None, None
+        else:
+            return None, None
+
+        # Remove .git suffix
+        if path.endswith(".git"):
+            path = path[:-4]
+
+        owner, repo = path.split("/", 1)
+        return owner, repo
+    except Exception as e:
+        log_debug("Failed to get repo from git: %s", e)
+        return None, None
+
+
+def parse_timestamp(timestamp_str: str) -> datetime:
+    """
+    Parse various timestamp formats to datetime (always returns timezone-aware).
+
+    Raises ValueError with clear message if timestamp cannot be parsed.
+    """
+    if not timestamp_str or not timestamp_str.strip():
+        raise ValueError("Timestamp string is empty or None")
+
+    try:
+        # Try Unix timestamp first
+        dt = datetime.fromtimestamp(float(timestamp_str))
+        # Make timezone-aware if naive
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, OverflowError):
+        try:
+            # Try ISO 8601 / RFC 3339
+            dt = date_parser.parse(timestamp_str)
+            # Make timezone-aware if naive
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"Invalid timestamp format: {timestamp_str}") from e
+
+
+def expand_output_pattern(pattern: str, owner: str, repo: str) -> str:
+    """
+    Expand output pattern with owner and repo placeholders.
+    Supports {owner} and {repo} placeholders.
+    """
+    return pattern.replace("{owner}", owner).replace("{repo}", repo)
 
 
 if __name__ == "__main__":

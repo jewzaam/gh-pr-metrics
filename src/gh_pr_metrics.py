@@ -50,6 +50,7 @@ API_QUOTA_RESERVE_PCT = 0.05  # Reserve 5% of total quota, don't exhaust complet
 # Global API quota tracking (updated from response headers, thread-safe)
 _api_quota_remaining = 0
 _api_quota_limit = 0
+_api_quota_reset = 0  # Unix timestamp when quota resets
 _quota_lock = threading.Lock()
 
 
@@ -93,16 +94,19 @@ def log_debug(msg: str, *args, **kwargs) -> None:
 
 def update_quota_from_headers(headers: dict) -> None:
     """Update global quota tracking from API response headers (thread-safe)."""
-    global _api_quota_remaining, _api_quota_limit
+    global _api_quota_remaining, _api_quota_limit, _api_quota_reset
 
     remaining = headers.get("X-RateLimit-Remaining")
     limit = headers.get("X-RateLimit-Limit")
+    reset = headers.get("X-RateLimit-Reset")
 
     with _quota_lock:
         if remaining is not None:
             _api_quota_remaining = int(remaining)
         if limit is not None:
             _api_quota_limit = int(limit)
+        if reset is not None:
+            _api_quota_reset = int(reset)
 
 
 def decrement_quota_estimate(calls: int = 1) -> None:
@@ -455,7 +459,7 @@ def get_rate_limit_info(token: Optional[str] = None) -> Dict[str, Any]:
     Returns dict with 'remaining', 'limit', 'reset' keys.
     Returns empty dict on error.
     """
-    global _api_quota_remaining, _api_quota_limit
+    global _api_quota_remaining, _api_quota_limit, _api_quota_reset
 
     headers = {
         "Accept": "application/vnd.github+json",
@@ -472,19 +476,53 @@ def get_rate_limit_info(token: Optional[str] = None) -> Dict[str, Any]:
         core = data.get("resources", {}).get("core", {})
         remaining = core.get("remaining", 0)
         limit = core.get("limit", 0)
+        reset = core.get("reset", 0)
 
-        # Update global tracking
-        _api_quota_remaining = remaining
-        _api_quota_limit = limit
+        # Update global tracking (thread-safe)
+        with _quota_lock:
+            _api_quota_remaining = remaining
+            _api_quota_limit = limit
+            _api_quota_reset = reset
 
         return {
             "remaining": remaining,
             "limit": limit,
-            "reset": core.get("reset", 0),
+            "reset": reset,
         }
     except Exception as e:
         log_debug("Could not check rate limit: %s", e)
         return {}
+
+
+def wait_for_quota_reset() -> bool:
+    """
+    Wait until API quota resets using globally tracked reset timestamp.
+    Returns True if successfully waited, False if unable to determine reset time.
+    """
+    import time
+
+    reset_timestamp = _api_quota_reset + 15  # Add 15 seconds to be safe
+
+    if reset_timestamp == 0:
+        log_error("Cannot determine quota reset time (not initialized)")
+        return False
+
+    reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
+    now = datetime.now(timezone.utc)
+    wait_seconds = (reset_time - now).total_seconds()
+
+    if wait_seconds <= 0:
+        log_info("Quota already reset, refreshing...")
+        return True
+
+    wait_minutes = wait_seconds / 60
+    log_info(f"Waiting {wait_minutes:.1f} minutes for quota reset...")
+    log_info(f"Will resume at {reset_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+
+    time.sleep(wait_seconds)
+
+    log_info("Quota reset complete, refreshing quota like startup...")
+    return True
 
 
 def check_rate_limit(token: Optional[str] = None) -> None:
@@ -1053,6 +1091,11 @@ Environment Variables:
         action="store_true",
         help="Update all tracked repositories. Cannot be used with --owner/--repo or --output.",
     )
+    parser.add_argument(
+        "--wait",
+        action="store_true",
+        help="Wait for rate limit to reset if quota exhausted, then continue processing.",
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(
         "--workers",
@@ -1113,6 +1156,7 @@ def process_repository(
             _api_quota_remaining,
             _api_quota_limit,
         )
+        # Note: per-repo wait not implemented, only at update-all level
         return 1, 0, 0
 
     log_info(
@@ -1167,6 +1211,8 @@ def process_repository(
                     "after rate limit resets.",
                     repo_ctx,
                 )
+                # Note: per-page wait would require passing wait flag and token to this function
+                # Currently only supported at update-all level
                 break  # Exit while loop
 
             # Process this page of PRs
@@ -1462,8 +1508,19 @@ def main() -> int:
                 _api_quota_remaining,
                 _api_quota_limit,
             )
-            log_error("Wait for rate limit reset, then try again")
-            return 1
+            if args.wait:
+                if not wait_for_quota_reset():
+                    return 1
+                # After waiting, refresh quota like startup
+                get_rate_limit_info(token)
+                max_prs = calculate_max_prs_for_rate_limit()
+                if max_prs == 0:
+                    log_error("Quota still exhausted after reset, aborting")
+                    return 1
+                log_info("Resuming update-all with refreshed quota")
+            else:
+                log_error("Use --wait to automatically wait for reset, or try again later")
+                return 1
 
         log_info("Quota check: can process up to ~%d PRs total across all repos", max_prs)
 

@@ -14,8 +14,8 @@ class TestStateManagement:
         """Test loading state file that doesn't exist returns empty dict."""
         state_file = tmp_path / "nonexistent.yaml"
 
-        with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
-            state = gh_pr_metrics.load_state_file()
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            state = gh_pr_metrics.state_manager.load()
             assert state == {}
 
     def test_load_state_file_existing(self, tmp_path):
@@ -26,8 +26,8 @@ class TestStateManagement:
             "  timestamp: '2024-01-01T00:00:00'\n"
         )
 
-        with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
-            state = gh_pr_metrics.load_state_file()
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            state = gh_pr_metrics.state_manager.load()
             assert "https://github.com/owner/repo" in state
             assert state["https://github.com/owner/repo"]["timestamp"] == "2024-01-01T00:00:00"
             assert state["https://github.com/owner/repo"]["csv_file"] == "metrics.csv"
@@ -36,14 +36,14 @@ class TestStateManagement:
         """Test saving state file."""
         state_file = tmp_path / "state.yaml"
 
-        with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
             state = {
                 "https://github.com/owner/repo": {
                     "timestamp": "2024-01-01T00:00:00",
                     "csv_file": "metrics.csv",
                 }
             }
-            gh_pr_metrics.save_state_file(state)
+            gh_pr_metrics.state_manager.save(state)
 
             assert state_file.exists()
             content = state_file.read_text()
@@ -55,12 +55,12 @@ class TestStateManagement:
         """Test updating state file with new timestamp."""
         state_file = tmp_path / "state.yaml"
 
-        with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
             timestamp = datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
-            gh_pr_metrics.update_state_file("owner", "repo", timestamp, "metrics.csv")
+            gh_pr_metrics.state_manager.update_repo("owner", "repo", timestamp, "metrics.csv")
 
             # Verify state was saved (without timezone component)
-            state = gh_pr_metrics.load_state_file()
+            state = gh_pr_metrics.state_manager.load()
             repo_key = "https://github.com/owner/repo"
             assert repo_key in state
             assert "2024-01-15T12:00:00" == state[repo_key]["timestamp"]
@@ -70,17 +70,17 @@ class TestStateManagement:
         """Test state file can track multiple repositories."""
         state_file = tmp_path / "state.yaml"
 
-        with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
             # Add first repo
             timestamp1 = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
-            gh_pr_metrics.update_state_file("owner1", "repo1", timestamp1, "repo1.csv")
+            gh_pr_metrics.state_manager.update_repo("owner1", "repo1", timestamp1, "repo1.csv")
 
             # Add second repo
             timestamp2 = datetime(2024, 1, 2, 0, 0, 0, tzinfo=timezone.utc)
-            gh_pr_metrics.update_state_file("owner2", "repo2", timestamp2, "repo2.csv")
+            gh_pr_metrics.state_manager.update_repo("owner2", "repo2", timestamp2, "repo2.csv")
 
             # Verify both are in state
-            state = gh_pr_metrics.load_state_file()
+            state = gh_pr_metrics.state_manager.load()
             assert "https://github.com/owner1/repo1" in state
             assert "https://github.com/owner2/repo2" in state
             assert state["https://github.com/owner1/repo1"]["csv_file"] == "repo1.csv"
@@ -90,17 +90,17 @@ class TestStateManagement:
         """Test updating state file overwrites previous timestamp."""
         state_file = tmp_path / "state.yaml"
 
-        with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
             # First update
             timestamp1 = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
-            gh_pr_metrics.update_state_file("owner", "repo", timestamp1, "old.csv")
+            gh_pr_metrics.state_manager.update_repo("owner", "repo", timestamp1, "old.csv")
 
             # Second update (overwrites)
             timestamp2 = datetime(2024, 1, 15, 0, 0, 0, tzinfo=timezone.utc)
-            gh_pr_metrics.update_state_file("owner", "repo", timestamp2, "new.csv")
+            gh_pr_metrics.state_manager.update_repo("owner", "repo", timestamp2, "new.csv")
 
             # Verify only latest timestamp and file are stored
-            state = gh_pr_metrics.load_state_file()
+            state = gh_pr_metrics.state_manager.load()
             repo_key = "https://github.com/owner/repo"
             assert repo_key in state
             assert "2024-01-15T00:00:00" == state[repo_key]["timestamp"]
@@ -110,8 +110,8 @@ class TestStateManagement:
         """Test getting tracked repos when state file is empty."""
         state_file = tmp_path / "state.yaml"
 
-        with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
-            repos = gh_pr_metrics.get_all_tracked_repos()
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            repos = gh_pr_metrics.state_manager.get_all_tracked_repos()
             assert repos == []
 
     def test_get_all_tracked_repos_single_repo(self, tmp_path):
@@ -122,8 +122,8 @@ class TestStateManagement:
             "  timestamp: '2024-01-01T00:00:00Z'\n"
         )
 
-        with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
-            repos = gh_pr_metrics.get_all_tracked_repos()
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            repos = gh_pr_metrics.state_manager.get_all_tracked_repos()
             assert len(repos) == 1
             assert repos[0]["owner"] == "owner"
             assert repos[0]["repo"] == "repo"
@@ -141,8 +141,8 @@ class TestStateManagement:
             "  timestamp: '2024-01-02T00:00:00Z'\n"
         )
 
-        with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
-            repos = gh_pr_metrics.get_all_tracked_repos()
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            repos = gh_pr_metrics.state_manager.get_all_tracked_repos()
             assert len(repos) == 2
             owners = [r["owner"] for r in repos]
             assert "owner1" in owners
@@ -157,8 +157,8 @@ class TestStateManagement:
             "  timestamp: '2024-01-02T00:00:00Z'\n"
         )
 
-        with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
-            repos = gh_pr_metrics.get_all_tracked_repos()
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            repos = gh_pr_metrics.state_manager.get_all_tracked_repos()
             # Should only get the valid repo
             assert len(repos) == 1
             assert repos[0]["owner"] == "owner2"
@@ -173,8 +173,8 @@ class TestStateManagement:
             "  timestamp: '2024-01-02T00:00:00Z'\n"
         )
 
-        with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
-            repos = gh_pr_metrics.get_all_tracked_repos()
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            repos = gh_pr_metrics.state_manager.get_all_tracked_repos()
             # Should only get the valid repo
             assert len(repos) == 1
             assert repos[0]["owner"] == "owner"

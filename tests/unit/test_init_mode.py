@@ -100,12 +100,12 @@ class TestInitMode:
                 "2024-01-01",
             ],
         ):
-            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
                 result = gh_pr_metrics.main()
                 assert result == 0
 
                 # Verify state file (within mock context)
-                state = gh_pr_metrics.load_state_file()
+                state = gh_pr_metrics.state_manager.load()
                 assert "https://github.com/testowner/testrepo" in state
                 assert state["https://github.com/testowner/testrepo"]["csv_file"] == str(csv_file)
 
@@ -170,12 +170,12 @@ class TestInitMode:
                 "2024-01-01",
             ],
         ):
-            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
                 result = gh_pr_metrics.main()
                 assert result == 0
 
                 # Verify state file has all repos (within mock context)
-                state = gh_pr_metrics.load_state_file()
+                state = gh_pr_metrics.state_manager.load()
                 assert len(state) == 3
                 assert "https://github.com/testowner/repo1" in state
                 assert "https://github.com/testowner/repo2" in state
@@ -237,13 +237,13 @@ class TestInitMode:
                 output_pattern,
             ],
         ):
-            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
                 result = gh_pr_metrics.main()
                 # Should return 1 because at least one repo failed
                 assert result == 1
 
                 # Verify state file only has accessible repo (within mock context)
-                state = gh_pr_metrics.load_state_file()
+                state = gh_pr_metrics.state_manager.load()
                 assert len(state) == 1
                 assert "https://github.com/testowner/accessible" in state
 
@@ -311,12 +311,12 @@ class TestInitMode:
                 output_pattern,
             ],
         ):
-            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
                 result = gh_pr_metrics.main()
                 assert result == 0
 
                 # Verify state file has both repos (within mock context)
-                state = gh_pr_metrics.load_state_file()
+                state = gh_pr_metrics.state_manager.load()
                 assert len(state) == 2
                 # Existing repo should keep its original csv_file
                 assert state["https://github.com/testowner/existing"]["csv_file"] == str(csv_file)
@@ -360,12 +360,12 @@ class TestInitMode:
                 str(csv_file),
             ],
         ):
-            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
                 result = gh_pr_metrics.main()
                 assert result == 0
 
                 # Verify state file has a timestamp (should be 365 days ago by default)
-                state = gh_pr_metrics.load_state_file()
+                state = gh_pr_metrics.state_manager.load()
                 repo_key = "https://github.com/testowner/testrepo"
                 assert repo_key in state
                 # Just verify timestamp exists and is valid

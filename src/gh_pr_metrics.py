@@ -242,8 +242,145 @@ class QuotaManager:
         return True, max_prs
 
 
-# Global quota manager instance
+class StateManager:
+    """
+    Manages state file for tracking repository processing progress.
+
+    State file stores last update timestamp and CSV file path per repository.
+    """
+
+    def __init__(self, state_file_path: Path = None):
+        """Initialize state manager with path to state file."""
+        self._state_file = state_file_path or STATE_FILE
+
+    def load(self) -> Dict[str, Any]:
+        """Load state file containing last update dates per repo."""
+        if not self._state_file.exists():
+            return {}
+
+        try:
+            with open(self._state_file, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+                return data
+        except Exception as e:
+            log_warning("Failed to load state file %s: %s", self._state_file, e)
+            return {}
+
+    def save(self, state: Dict[str, Any]) -> None:
+        """Save state file with last update dates per repo."""
+        try:
+            with open(self._state_file, "w", encoding="utf-8") as f:
+                yaml.safe_dump(state, f, default_flow_style=False, sort_keys=True)
+
+            log_debug("Saved state file to %s", self._state_file)
+        except Exception as e:
+            log_error("Failed to save state file %s: %s", self._state_file, e)
+            raise
+
+    def get_repo_remote_url(self, owner: str, repo: str) -> str:
+        """
+        Get repository remote URL key for state tracking.
+        Uses format: https://github.com/owner/repo
+        """
+        return f"https://github.com/{owner}/{repo}"
+
+    def get_repo_state(self, owner: str, repo: str) -> Optional[Dict[str, Any]]:
+        """
+        Get state for a repository (timestamp and csv_file).
+        Returns dict with 'timestamp' and 'csv_file' keys, or None if not found.
+        Raises ValueError if state is malformed.
+        """
+        state = self.load()
+        repo_key = self.get_repo_remote_url(owner, repo)
+
+        if repo_key not in state:
+            return None
+
+        entry = state[repo_key]
+
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"Invalid state format for {repo_key} in state file. "
+                f"Expected dict with 'timestamp' and 'csv_file', got {type(entry).__name__}"
+            )
+
+        timestamp_str = entry.get("timestamp", "")
+        csv_file = entry.get("csv_file")
+
+        if not timestamp_str:
+            raise ValueError(
+                f"Missing or empty 'timestamp' field for {repo_key} in state file. "
+                f"State file location: {self._state_file}"
+            )
+
+        if not csv_file:
+            raise ValueError(
+                f"Missing or empty 'csv_file' field for {repo_key} in state file. "
+                f"State file location: {self._state_file}"
+            )
+
+        try:
+            timestamp = parse_timestamp(timestamp_str)
+        except ValueError as e:
+            raise ValueError(
+                f"Invalid timestamp for {repo_key} in state file: {e}. "
+                f"State file location: {self._state_file}"
+            ) from e
+
+        return {"timestamp": timestamp, "csv_file": csv_file}
+
+    def update_repo(self, owner: str, repo: str, timestamp: datetime, csv_file: str) -> None:
+        """Update state file with new last update date and csv file for a repository."""
+        state = self.load()
+        repo_key = self.get_repo_remote_url(owner, repo)
+        # Store as UTC timestamp without timezone component
+        utc_timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
+        state[repo_key] = {"timestamp": utc_timestamp.isoformat(), "csv_file": csv_file}
+        self.save(state)
+
+    def get_all_tracked_repos(self) -> List[Dict[str, Any]]:
+        """
+        Get all tracked repositories from state file.
+        Returns list of dicts with 'url', 'owner', 'repo', 'timestamp', 'csv_file'.
+        """
+        state = self.load()
+        repos = []
+
+        for repo_url, entry in state.items():
+            # Parse URL to get owner/repo
+            # Format: https://github.com/owner/repo
+            try:
+                parts = repo_url.rstrip("/").split("/")
+                if len(parts) >= 2:
+                    owner = parts[-2]
+                    repo = parts[-1]
+
+                    if isinstance(entry, dict):
+                        timestamp = parse_timestamp(entry.get("timestamp", ""))
+                        csv_file = entry.get("csv_file")
+                    else:
+                        log_warning("Skipping %s: invalid state format", repo_url)
+                        continue
+
+                    repos.append(
+                        {
+                            "url": repo_url,
+                            "owner": owner,
+                            "repo": repo,
+                            "timestamp": timestamp,
+                            "csv_file": csv_file,
+                        }
+                    )
+            except Exception as e:
+                log_warning("Failed to parse state entry for %s: %s", repo_url, e)
+                continue
+
+        return repos
+
+
+# Global manager instances
 quota_manager = QuotaManager()
+state_manager = StateManager()
 
 
 def log_info(msg: str, *args, **kwargs) -> None:
@@ -274,137 +411,6 @@ def setup_logging(debug: bool = False) -> None:
         format="%(asctime)s - %(levelname)s - %(message)s",
         stream=sys.stderr,
     )
-
-
-def load_state_file() -> Dict[str, str]:
-    """Load state file containing last update dates per repo."""
-    if not STATE_FILE.exists():
-        return {}
-
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-            return data
-    except Exception as e:
-        log_warning("Failed to load state file %s: %s", STATE_FILE, e)
-        return {}
-
-
-def save_state_file(state: Dict[str, str]) -> None:
-    """Save state file with last update dates per repo."""
-    try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            yaml.safe_dump(state, f, default_flow_style=False, sort_keys=True)
-
-        log_debug("Saved state file to %s", STATE_FILE)
-    except Exception as e:
-        log_error("Failed to save state file %s: %s", STATE_FILE, e)
-        raise
-
-
-def get_repo_remote_url(owner: str, repo: str) -> str:
-    """
-    Get repository remote URL key for state tracking.
-    Uses format: https://github.com/owner/repo
-    Future-proof for GitLab, GitHub Enterprise, etc.
-    """
-    return f"https://github.com/{owner}/{repo}"
-
-
-def get_repo_state(owner: str, repo: str) -> Optional[Dict[str, Any]]:
-    """
-    Get state for a repository (timestamp and csv_file).
-    Returns dict with 'timestamp' and 'csv_file' keys, or None if not found.
-    Raises ValueError if state is malformed with clear error message.
-    """
-    state = load_state_file()
-    repo_key = get_repo_remote_url(owner, repo)
-
-    if repo_key not in state:
-        return None
-
-    entry = state[repo_key]
-
-    if not isinstance(entry, dict):
-        raise ValueError(
-            f"Invalid state format for {repo_key} in state file. "
-            f"Expected dict with 'timestamp' and 'csv_file', got {type(entry).__name__}"
-        )
-
-    timestamp_str = entry.get("timestamp", "")
-    csv_file = entry.get("csv_file")
-
-    if not timestamp_str:
-        raise ValueError(
-            f"Missing or empty 'timestamp' field for {repo_key} in state file. "
-            f"State file location: {STATE_FILE}"
-        )
-
-    if not csv_file:
-        raise ValueError(
-            f"Missing or empty 'csv_file' field for {repo_key} in state file. "
-            f"State file location: {STATE_FILE}"
-        )
-
-    try:
-        timestamp = parse_timestamp(timestamp_str)
-    except ValueError as e:
-        raise ValueError(
-            f"Invalid timestamp for {repo_key} in state file: {e}. "
-            f"State file location: {STATE_FILE}"
-        ) from e
-
-    return {"timestamp": timestamp, "csv_file": csv_file}
-
-
-def get_all_tracked_repos() -> List[Dict[str, Any]]:
-    """
-    Get all tracked repositories from state file.
-    Returns list of dicts with 'url', 'owner', 'repo', 'timestamp', 'csv_file'.
-    """
-    state = load_state_file()
-    repos = []
-
-    for repo_url, entry in state.items():
-        # Parse URL to get owner/repo
-        # Format: https://github.com/owner/repo
-        try:
-            parts = repo_url.rstrip("/").split("/")
-            if len(parts) >= 2:
-                owner = parts[-2]
-                repo = parts[-1]
-
-                if isinstance(entry, dict):
-                    timestamp = parse_timestamp(entry.get("timestamp", ""))
-                    csv_file = entry.get("csv_file")
-                else:
-                    log_warning("Skipping %s: invalid state format", repo_url)
-                    continue
-
-                repos.append(
-                    {
-                        "url": repo_url,
-                        "owner": owner,
-                        "repo": repo,
-                        "timestamp": timestamp,
-                        "csv_file": csv_file,
-                    }
-                )
-        except Exception as e:
-            log_warning("Failed to parse state entry for %s: %s", repo_url, e)
-            continue
-
-    return repos
-
-
-def update_state_file(owner: str, repo: str, timestamp: datetime, csv_file: str) -> None:
-    """Update state file with new last update date and csv file for a repository."""
-    state = load_state_file()
-    repo_key = get_repo_remote_url(owner, repo)
-    # Store as UTC timestamp without timezone component to avoid confusion
-    utc_timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
-    state[repo_key] = {"timestamp": utc_timestamp.isoformat(), "csv_file": csv_file}
-    save_state_file(state)
 
 
 def estimate_api_calls_for_prs(pr_count: int) -> int:
@@ -1123,7 +1129,7 @@ def process_repository(
                     # Exhausted PR list - update state to last processed or end_date
                     log_info("[%s] Page %d: No more PRs in date range", repo_ctx, page)
                 # Update to end_date so we don't reprocess this range
-                update_state_file(owner, repo, end_date, output_file)
+                state_manager.update_repo(owner, repo, end_date, output_file)
                 break
 
             total_prs = len(prs)
@@ -1217,7 +1223,7 @@ def process_repository(
                 last_processed_timestamp = newest_pr_updated
 
                 # Update state file with the oldest timestamp from this page
-                update_state_file(owner, repo, last_processed_timestamp, output_file)
+                state_manager.update_repo(owner, repo, last_processed_timestamp, output_file)
                 pages_completed += 1
 
                 log_info(
@@ -1371,7 +1377,7 @@ def main() -> int:
         repos_needing_validation = []
         already_tracked_count = 0
         for repo in repos_to_init:
-            if get_repo_state(owner, repo):
+            if state_manager.get_repo_state(owner, repo):
                 already_tracked_count += 1
             else:
                 repos_needing_validation.append(repo)
@@ -1402,7 +1408,7 @@ def main() -> int:
 
         for repo in repos_to_init:
             # Check if already tracked
-            existing_state = get_repo_state(owner, repo)
+            existing_state = state_manager.get_repo_state(owner, repo)
             if existing_state:
                 log_info(
                     "[%s/%s] Already tracked (last update: %s), skipping",
@@ -1434,7 +1440,7 @@ def main() -> int:
             write_csv_output([], csv_file, merge_mode=False, force_write=True)
 
             # Update state file
-            update_state_file(owner, repo, start_date, csv_file)
+            state_manager.update_repo(owner, repo, start_date, csv_file)
             log_info("[%s/%s] Initialized (start date: %s)", owner, repo, start_date.isoformat())
             successful += 1
 
@@ -1452,7 +1458,7 @@ def main() -> int:
     # Handle update-all mode
     if args.update_all:
         try:
-            tracked_repos = get_all_tracked_repos()
+            tracked_repos = state_manager.get_all_tracked_repos()
         except Exception as e:
             log_error("Failed to load state file: %s", e)
             return 1
@@ -1611,7 +1617,7 @@ def main() -> int:
             return 1
 
         try:
-            repo_state = get_repo_state(owner, repo)
+            repo_state = state_manager.get_repo_state(owner, repo)
         except ValueError as e:
             log_error("State file validation failed: %s", e)
             return 1

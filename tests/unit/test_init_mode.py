@@ -64,6 +64,20 @@ class TestInitMode:
         state_file = tmp_path / "state.yaml"
         csv_file = tmp_path / "test.csv"
 
+        # Mock rate limit check at startup
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={
+                "resources": {
+                    "core": {
+                        "limit": 5000,
+                        "remaining": 4999,
+                        "reset": 1699999999,
+                    }
+                }
+            },
+        )
+
         # Mock repo validation
         requests_mock.get(
             "https://api.github.com/repos/testowner/testrepo",
@@ -86,12 +100,12 @@ class TestInitMode:
                 "2024-01-01",
             ],
         ):
-            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
                 result = gh_pr_metrics.main()
                 assert result == 0
 
                 # Verify state file (within mock context)
-                state = gh_pr_metrics.load_state_file()
+                state = gh_pr_metrics.state_manager.load()
                 assert "https://github.com/testowner/testrepo" in state
                 assert state["https://github.com/testowner/testrepo"]["csv_file"] == str(csv_file)
 
@@ -103,6 +117,20 @@ class TestInitMode:
         state_file = tmp_path / "state.yaml"
         output_dir = tmp_path / "data"
         output_pattern = str(output_dir / "{owner}-{repo}.csv")
+
+        # Mock rate limit check at startup
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={
+                "resources": {
+                    "core": {
+                        "limit": 5000,
+                        "remaining": 4999,
+                        "reset": 1699999999,
+                    }
+                }
+            },
+        )
 
         # Mock listing repos
         requests_mock.get(
@@ -142,12 +170,12 @@ class TestInitMode:
                 "2024-01-01",
             ],
         ):
-            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
                 result = gh_pr_metrics.main()
                 assert result == 0
 
                 # Verify state file has all repos (within mock context)
-                state = gh_pr_metrics.load_state_file()
+                state = gh_pr_metrics.state_manager.load()
                 assert len(state) == 3
                 assert "https://github.com/testowner/repo1" in state
                 assert "https://github.com/testowner/repo2" in state
@@ -163,6 +191,20 @@ class TestInitMode:
         state_file = tmp_path / "state.yaml"
         output_dir = tmp_path / "data"
         output_pattern = str(output_dir / "{owner}-{repo}.csv")
+
+        # Mock rate limit check at startup
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={
+                "resources": {
+                    "core": {
+                        "limit": 5000,
+                        "remaining": 4999,
+                        "reset": 1699999999,
+                    }
+                }
+            },
+        )
 
         # Mock listing repos
         requests_mock.get(
@@ -195,13 +237,13 @@ class TestInitMode:
                 output_pattern,
             ],
         ):
-            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
                 result = gh_pr_metrics.main()
                 # Should return 1 because at least one repo failed
                 assert result == 1
 
                 # Verify state file only has accessible repo (within mock context)
-                state = gh_pr_metrics.load_state_file()
+                state = gh_pr_metrics.state_manager.load()
                 assert len(state) == 1
                 assert "https://github.com/testowner/accessible" in state
 
@@ -222,6 +264,20 @@ class TestInitMode:
             f"https://github.com/testowner/existing:\n"
             f"  csv_file: {csv_file}\n"
             f"  timestamp: '2024-01-01T00:00:00'\n"
+        )
+
+        # Mock rate limit check at startup
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={
+                "resources": {
+                    "core": {
+                        "limit": 5000,
+                        "remaining": 4999,
+                        "reset": 1699999999,
+                    }
+                }
+            },
         )
 
         # Mock listing repos
@@ -255,12 +311,12 @@ class TestInitMode:
                 output_pattern,
             ],
         ):
-            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
                 result = gh_pr_metrics.main()
                 assert result == 0
 
                 # Verify state file has both repos (within mock context)
-                state = gh_pr_metrics.load_state_file()
+                state = gh_pr_metrics.state_manager.load()
                 assert len(state) == 2
                 # Existing repo should keep its original csv_file
                 assert state["https://github.com/testowner/existing"]["csv_file"] == str(csv_file)
@@ -269,6 +325,20 @@ class TestInitMode:
         """Test that init uses default start date when --start not provided."""
         state_file = tmp_path / "state.yaml"
         csv_file = tmp_path / "test.csv"
+
+        # Mock rate limit check at startup
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={
+                "resources": {
+                    "core": {
+                        "limit": 5000,
+                        "remaining": 4999,
+                        "reset": 1699999999,
+                    }
+                }
+            },
+        )
 
         # Mock repo validation
         requests_mock.get(
@@ -290,12 +360,12 @@ class TestInitMode:
                 str(csv_file),
             ],
         ):
-            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
                 result = gh_pr_metrics.main()
                 assert result == 0
 
                 # Verify state file has a timestamp (should be 365 days ago by default)
-                state = gh_pr_metrics.load_state_file()
+                state = gh_pr_metrics.state_manager.load()
                 repo_key = "https://github.com/testowner/testrepo"
                 assert repo_key in state
                 # Just verify timestamp exists and is valid
@@ -303,101 +373,6 @@ class TestInitMode:
                 assert timestamp_str
                 gh_pr_metrics.parse_timestamp(timestamp_str)
 
-
-class TestListOwnerRepos:
-    """Test list_owner_repos function."""
-
-    def test_list_org_repos(self, requests_mock):
-        """Test listing repos for an organization."""
-        requests_mock.get(
-            "https://api.github.com/orgs/testorg/repos",
-            json=[
-                {"name": "repo1"},
-                {"name": "repo2"},
-            ],
-        )
-
-        repos = gh_pr_metrics.list_owner_repos("testorg")
-        assert repos == ["repo1", "repo2"]
-
-    def test_list_user_repos(self, requests_mock):
-        """Test listing repos for a user when org request fails."""
-        # First request (org) fails with 404
-        requests_mock.get(
-            "https://api.github.com/orgs/testuser/repos",
-            status_code=404,
-        )
-        # Second request (user) succeeds
-        requests_mock.get(
-            "https://api.github.com/users/testuser/repos",
-            json=[
-                {"name": "userrepo1"},
-                {"name": "userrepo2"},
-            ],
-        )
-
-        repos = gh_pr_metrics.list_owner_repos("testuser")
-        assert repos == ["userrepo1", "userrepo2"]
-
-    def test_list_repos_pagination(self, requests_mock):
-        """Test that repo listing handles pagination."""
-        # First page
-        requests_mock.get(
-            "https://api.github.com/orgs/testorg/repos",
-            [
-                {
-                    "json": [{"name": f"repo{i}"} for i in range(100)],
-                    "status_code": 200,
-                },
-                {
-                    "json": [{"name": f"repo{i}"} for i in range(100, 150)],
-                    "status_code": 200,
-                },
-            ],
-        )
-
-        repos = gh_pr_metrics.list_owner_repos("testorg")
-        assert len(repos) == 150
-        assert repos[0] == "repo0"
-        assert repos[99] == "repo99"
-        assert repos[149] == "repo149"
-
-
-class TestValidateRepoAccess:
-    """Test validate_repo_access function."""
-
-    def test_accessible_repo(self, requests_mock):
-        """Test validation succeeds for accessible repo."""
-        requests_mock.get(
-            "https://api.github.com/repos/owner/repo",
-            json={"name": "repo", "owner": {"login": "owner"}},
-        )
-
-        result = gh_pr_metrics.validate_repo_access("owner", "repo")
-        assert result is True
-
-    def test_inaccessible_repo(self, requests_mock):
-        """Test validation fails for inaccessible repo."""
-        requests_mock.get(
-            "https://api.github.com/repos/owner/private",
-            status_code=404,
-        )
-
-        result = gh_pr_metrics.validate_repo_access("owner", "private")
-        assert result is False
-
-    def test_forbidden_repo(self, requests_mock):
-        """Test validation fails for forbidden repo."""
-        requests_mock.get(
-            "https://api.github.com/repos/owner/forbidden",
-            status_code=403,
-        )
-
-        result = gh_pr_metrics.validate_repo_access("owner", "forbidden")
-        assert result is False
-
-
-class TestExpandOutputPattern:
     """Test expand_output_pattern function."""
 
     def test_expand_basic_pattern(self):

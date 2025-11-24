@@ -72,7 +72,7 @@ class TestMain:
             "argv",
             ["gh-pr-metrics", "--owner", "testowner", "--repo", "testrepo", "--update"],
         ):
-            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
                 result = gh_pr_metrics.main()
                 assert result == 0
 
@@ -85,7 +85,7 @@ class TestMain:
             "argv",
             ["gh-pr-metrics", "--owner", "testowner", "--repo", "testrepo", "--update"],
         ):
-            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
                 result = gh_pr_metrics.main()
                 assert result == 1  # Should fail - no state
 
@@ -94,7 +94,7 @@ class TestMain:
         state_file = tmp_path / "state.yaml"
 
         with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all"]):
-            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
                 result = gh_pr_metrics.main()
                 assert result == 1
 
@@ -129,7 +129,7 @@ class TestMain:
         )
 
         with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all"]):
-            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
                 result = gh_pr_metrics.main()
                 assert result == 0
 
@@ -164,7 +164,7 @@ class TestMain:
         )
 
         with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all"]):
-            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
                 result = gh_pr_metrics.main()
                 assert result == 1  # Returns failure due to partial failure
 
@@ -186,7 +186,7 @@ class TestMain:
         )
 
         with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all"]):
-            with mock.patch.object(gh_pr_metrics, "STATE_FILE", state_file):
+            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
                 with mock.patch(
                     "gh_pr_metrics.process_repository", return_value=(0, 1, 1)
                 ) as mock_process:

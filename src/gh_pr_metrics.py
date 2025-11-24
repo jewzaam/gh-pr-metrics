@@ -47,12 +47,6 @@ API_CALLS_PER_PR = 4  # Estimate: timeline events, reviews, comments, review com
 API_SAFETY_BUFFER = 10  # Reserve for safety (unauthenticated limit is 60/hour total)
 API_QUOTA_RESERVE_PCT = 0.05  # Reserve 5% of total quota, don't exhaust completely
 
-# Global API quota tracking (updated from response headers, thread-safe)
-_api_quota_remaining = 0
-_api_quota_limit = 0
-_api_quota_reset = 0  # Unix timestamp when quota resets
-_quota_lock = threading.Lock()
-
 
 class GitHubAPIError(Exception):
     """Exception raised for GitHub API errors."""
@@ -60,661 +54,692 @@ class GitHubAPIError(Exception):
     pass
 
 
-def _format_quota() -> str:
-    """Format current API quota for log prefix (thread-safe read)."""
-    with _quota_lock:
-        if _api_quota_limit == 0:
-            return "[API ----/----]"
-
-        # Left-pad remaining to match length of limit
-        limit_str = str(_api_quota_limit)
-        remaining_str = str(_api_quota_remaining).rjust(len(limit_str))
-        return f"[API {remaining_str}/{limit_str}]"
-
-
-def log_info(msg: str, *args, **kwargs) -> None:
-    """Log INFO with API quota prefix."""
-    logging.info(f"{_format_quota()} {msg}", *args, **kwargs)
-
-
-def log_warning(msg: str, *args, **kwargs) -> None:
-    """Log WARNING with API quota prefix."""
-    logging.warning(f"{_format_quota()} {msg}", *args, **kwargs)
-
-
-def log_error(msg: str, *args, **kwargs) -> None:
-    """Log ERROR with API quota prefix."""
-    logging.error(f"{_format_quota()} {msg}", *args, **kwargs)
-
-
-def log_debug(msg: str, *args, **kwargs) -> None:
-    """Log DEBUG with API quota prefix."""
-    logging.debug(f"{_format_quota()} {msg}", *args, **kwargs)
-
-
-def update_quota_from_headers(headers: dict) -> None:
-    """Update global quota tracking from API response headers (thread-safe)."""
-    global _api_quota_remaining, _api_quota_limit, _api_quota_reset
-
-    remaining = headers.get("X-RateLimit-Remaining")
-    limit = headers.get("X-RateLimit-Limit")
-    reset = headers.get("X-RateLimit-Reset")
-
-    with _quota_lock:
-        if remaining is not None:
-            _api_quota_remaining = int(remaining)
-        if limit is not None:
-            _api_quota_limit = int(limit)
-        if reset is not None:
-            _api_quota_reset = int(reset)
-
-
-def decrement_quota_estimate(calls: int = 1) -> None:
-    """Decrement estimated quota (called before API requests, thread-safe)."""
-    global _api_quota_remaining
-
-    with _quota_lock:
-        _api_quota_remaining = max(0, _api_quota_remaining - calls)
-
-
-def setup_logging(debug: bool = False) -> None:
-    """Configure logging based on debug flag."""
-    level = logging.DEBUG if debug else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        stream=sys.stderr,
-    )
-
-
-def load_state_file() -> Dict[str, str]:
-    """Load state file containing last update dates per repo."""
-    if not STATE_FILE.exists():
-        return {}
-
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-            return data
-    except Exception as e:
-        log_warning("Failed to load state file %s: %s", STATE_FILE, e)
-        return {}
-
-
-def save_state_file(state: Dict[str, str]) -> None:
-    """Save state file with last update dates per repo."""
-    try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            yaml.safe_dump(state, f, default_flow_style=False, sort_keys=True)
-
-        log_debug("Saved state file to %s", STATE_FILE)
-    except Exception as e:
-        log_error("Failed to save state file %s: %s", STATE_FILE, e)
-        raise
-
-
-def get_repo_remote_url(owner: str, repo: str) -> str:
+class QuotaManager:
     """
-    Get repository remote URL key for state tracking.
-    Uses format: https://github.com/owner/repo
-    Future-proof for GitLab, GitHub Enterprise, etc.
+    Manages GitHub API quota tracking and enforcement.
+
+    Tracks quota from response headers, provides quota checking,
+    and supports waiting for quota reset.
     """
-    return f"https://github.com/{owner}/{repo}"
 
+    def __init__(self):
+        """Initialize quota manager with zero quota."""
+        self._remaining = 0
+        self._limit = 0
+        self._reset = 0  # Unix timestamp when quota resets
+        self._lock = threading.Lock()
 
-def get_repo_state(owner: str, repo: str) -> Optional[Dict[str, Any]]:
-    """
-    Get state for a repository (timestamp and csv_file).
-    Returns dict with 'timestamp' and 'csv_file' keys, or None if not found.
-    Raises ValueError if state is malformed with clear error message.
-    """
-    state = load_state_file()
-    repo_key = get_repo_remote_url(owner, repo)
+    def get_quota_prefix(self) -> str:
+        """Get quota prefix for logging (thread-safe)."""
+        with self._lock:
+            if self._limit == 0:
+                return "[API ----/----]"
 
-    if repo_key not in state:
-        return None
+            # Left-pad remaining to match length of limit
+            limit_str = str(self._limit)
+            remaining_str = str(self._remaining).rjust(len(limit_str))
+            return f"[API {remaining_str}/{limit_str}]"
 
-    entry = state[repo_key]
+    def update_from_headers(self, headers: dict) -> None:
+        """Update quota tracking from API response headers (thread-safe)."""
+        remaining = headers.get("X-RateLimit-Remaining")
+        limit = headers.get("X-RateLimit-Limit")
+        reset = headers.get("X-RateLimit-Reset")
 
-    if not isinstance(entry, dict):
-        raise ValueError(
-            f"Invalid state format for {repo_key} in state file. "
-            f"Expected dict with 'timestamp' and 'csv_file', got {type(entry).__name__}"
-        )
+        with self._lock:
+            if remaining is not None:
+                self._remaining = int(remaining)
+            if limit is not None:
+                self._limit = int(limit)
+            if reset is not None:
+                self._reset = int(reset)
 
-    timestamp_str = entry.get("timestamp", "")
-    csv_file = entry.get("csv_file")
+    def get_current_quota(self) -> tuple[int, int, int]:
+        """Get current quota (thread-safe). Returns (remaining, limit, reset)."""
+        with self._lock:
+            return self._remaining, self._limit, self._reset
 
-    if not timestamp_str:
-        raise ValueError(
-            f"Missing or empty 'timestamp' field for {repo_key} in state file. "
-            f"State file location: {STATE_FILE}"
-        )
-
-    if not csv_file:
-        raise ValueError(
-            f"Missing or empty 'csv_file' field for {repo_key} in state file. "
-            f"State file location: {STATE_FILE}"
-        )
-
-    try:
-        timestamp = parse_timestamp(timestamp_str)
-    except ValueError as e:
-        raise ValueError(
-            f"Invalid timestamp for {repo_key} in state file: {e}. "
-            f"State file location: {STATE_FILE}"
-        ) from e
-
-    return {"timestamp": timestamp, "csv_file": csv_file}
-
-
-def get_last_update_date(owner: str, repo: str) -> Optional[datetime]:
-    """Get last update date for a repository from state file."""
-    repo_state = get_repo_state(owner, repo)
-    return repo_state["timestamp"] if repo_state else None
-
-
-def get_all_tracked_repos() -> List[Dict[str, Any]]:
-    """
-    Get all tracked repositories from state file.
-    Returns list of dicts with 'url', 'owner', 'repo', 'timestamp', 'csv_file'.
-    """
-    state = load_state_file()
-    repos = []
-
-    for repo_url, entry in state.items():
-        # Parse URL to get owner/repo
-        # Format: https://github.com/owner/repo
-        try:
-            parts = repo_url.rstrip("/").split("/")
-            if len(parts) >= 2:
-                owner = parts[-2]
-                repo = parts[-1]
-
-                if isinstance(entry, dict):
-                    timestamp = parse_timestamp(entry.get("timestamp", ""))
-                    csv_file = entry.get("csv_file")
-                else:
-                    log_warning("Skipping %s: invalid state format", repo_url)
-                    continue
-
-                repos.append(
-                    {
-                        "url": repo_url,
-                        "owner": owner,
-                        "repo": repo,
-                        "timestamp": timestamp,
-                        "csv_file": csv_file,
-                    }
-                )
-        except Exception as e:
-            log_warning("Failed to parse state entry for %s: %s", repo_url, e)
-            continue
-
-    return repos
-
-
-def update_state_file(owner: str, repo: str, timestamp: datetime, csv_file: str) -> None:
-    """Update state file with new last update date and csv file for a repository."""
-    state = load_state_file()
-    repo_key = get_repo_remote_url(owner, repo)
-    # Store as UTC timestamp without timezone component to avoid confusion
-    utc_timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
-    state[repo_key] = {"timestamp": utc_timestamp.isoformat(), "csv_file": csv_file}
-    save_state_file(state)
-
-
-def chunk_date_range(
-    start_date: datetime, end_date: datetime, max_days: int = MAX_CHUNK_DAYS
-) -> List[tuple[datetime, datetime]]:
-    """
-    Split a date range into chunks of max_days with 1-day overlap.
-    Returns list of (chunk_start, chunk_end) tuples.
-
-    Overlap ensures no PRs are missed due to timestamp precision.
-    Duplicates are handled by CSV merge (PR number deduplication).
-    """
-    chunks = []
-    current_start = start_date
-
-    while current_start < end_date:
-        # Calculate chunk end (either max_days from start or end_date, whichever is earlier)
-        chunk_end = min(current_start + timedelta(days=max_days), end_date)
-        chunks.append((current_start, chunk_end))
-
-        # Next chunk starts 1 day before this chunk ended (overlap to prevent gaps)
-        # Duplicates will be deduplicated by PR number during CSV merge
-        current_start = chunk_end - timedelta(days=1)
-
-        # Ensure we don't create infinite loops if chunk_end == end_date
-        if chunk_end >= end_date:
-            break
-
-    return chunks
-
-
-def estimate_api_calls_for_prs(pr_count: int) -> int:
-    """
-    Estimate API calls needed to process pr_count PRs.
-    Each PR requires: timeline events, reviews, review comments, issue comments.
-    """
-    return pr_count * API_CALLS_PER_PR
-
-
-def calculate_max_prs_for_rate_limit() -> int:
-    """
-    Calculate maximum number of PRs we can process with current rate limit.
-    Uses global quota tracking (updated from headers), doesn't make API call.
-    Reserves % of total quota to avoid complete exhaustion.
-    Returns max PRs, or 0 if rate limit exhausted.
-    """
-    # Use global quota (already updated from headers)
-    remaining = _api_quota_remaining
-    limit = _api_quota_limit
-
-    if limit == 0:
-        return 100  # Not initialized yet, conservative default
-
-    # Reserve 5% of total quota (don't exhaust completely)
-    reserve = int(limit * API_QUOTA_RESERVE_PCT)
-    # Use whichever is larger: fixed buffer or percentage reserve
-    effective_buffer = max(API_SAFETY_BUFFER, reserve)
-
-    available_for_prs = max(0, remaining - effective_buffer)
-    max_prs = available_for_prs // API_CALLS_PER_PR
-
-    return max_prs
-
-
-def check_sufficient_rate_limit(
-    estimated_calls: int, repo_ctx: str, chunk_info: str = ""
-) -> tuple[bool, int]:
-    """
-    Check if sufficient API rate limit is available using global quota tracking.
-    Does NOT make an API call - uses quota updated from response headers.
-
-    Returns (sufficient, max_prs_possible).
-    sufficient: True if we can process estimated_calls
-    max_prs_possible: Maximum PRs we could process with current quota
-    Logs appropriate messages.
-
-    chunk_info: Optional string like "Page 1: " for context
-    """
-    # Use global quota (no API call unless not initialized)
-    remaining = _api_quota_remaining
-    limit = _api_quota_limit
-
-    if limit == 0:
-        # Quota not initialized yet - initialize it now (one-time API call)
-        log_warning("[%s] Quota not initialized, fetching current status", repo_ctx)
-        rate_info = get_rate_limit_info(get_github_token())
-        if not rate_info:
-            # Failed to get quota - cannot proceed safely
-            log_error("[%s] Failed to fetch quota, cannot verify rate limit", repo_ctx)
-            return False, 0
-        remaining = rate_info["remaining"]
-        limit = rate_info["limit"]
-
-    # Calculate max PRs we can handle
-    max_prs = calculate_max_prs_for_rate_limit()
-
-    # Calculate effective buffer (5% of total or fixed buffer, whichever is larger)
-    reserve = int(limit * API_QUOTA_RESERVE_PCT)
-    effective_buffer = max(API_SAFETY_BUFFER, reserve)
-
-    # Show estimated calls for this operation
-    log_info("[%s] %sEstimated API calls: ~%d", repo_ctx, chunk_info, estimated_calls)
-
-    if remaining <= (estimated_calls + effective_buffer):
-        log_error(
-            "[%s] %sInsufficient API rate limit: need ~%d calls + %d buffer "
-            "(reserve=%d), only %d available",
-            repo_ctx,
-            chunk_info,
-            estimated_calls,
-            effective_buffer,
-            reserve,
-            remaining,
-        )
-        log_warning(
-            "[%s] %sCurrent quota allows processing ~%d PRs max", repo_ctx, chunk_info, max_prs
-        )
-        return False, max_prs
-
-    return True, max_prs
-
-
-def get_github_token() -> Optional[str]:
-    """Get GitHub token from environment."""
-    return os.getenv("GITHUB_TOKEN")
-
-
-def get_repo_from_git() -> tuple[Optional[str], Optional[str]]:
-    """
-    Get repository owner and name from git config.
-    Returns (owner, repo) or (None, None) if not found.
-    """
-    try:
-        remote_url = subprocess.check_output(
-            ["git", "config", "--get", "remote.origin.url"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-
-        # Parse SSH URL (git@github.com:owner/repo.git)
-        if remote_url.startswith("git@"):
-            _, path = remote_url.split(":", 1)
-        # Parse HTTPS URL (https://github.com/owner/repo.git)
-        elif remote_url.startswith("https://"):
-            parts = remote_url.split("/")
-            if len(parts) >= 5:
-                path = f"{parts[3]}/{parts[4]}"
-            else:
-                return None, None
-        else:
-            return None, None
-
-        # Remove .git suffix
-        if path.endswith(".git"):
-            path = path[:-4]
-
-        owner, repo = path.split("/", 1)
-        return owner, repo
-    except Exception as e:
-        log_debug("Failed to get repo from git: %s", e)
-        return None, None
-
-
-def parse_timestamp(timestamp_str: str) -> datetime:
-    """
-    Parse various timestamp formats to datetime (always returns timezone-aware).
-
-    Raises ValueError with clear message if timestamp cannot be parsed.
-    """
-    if not timestamp_str or not timestamp_str.strip():
-        raise ValueError("Timestamp string is empty or None")
-
-    try:
-        # Try Unix timestamp first
-        dt = datetime.fromtimestamp(float(timestamp_str))
-        # Make timezone-aware if naive
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except (ValueError, OverflowError):
-        try:
-            # Try ISO 8601 / RFC 3339
-            dt = date_parser.parse(timestamp_str)
-            # Make timezone-aware if naive
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
-        except (ValueError, TypeError) as e:
-            raise ValueError(f"Invalid timestamp format: {timestamp_str}") from e
-
-
-def get_rate_limit_info(token: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Get GitHub API rate limit information and update global quota tracking.
-    Returns dict with 'remaining', 'limit', 'reset' keys.
-    Returns empty dict on error.
-    """
-    global _api_quota_remaining, _api_quota_limit, _api_quota_reset
-
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    try:
-        response = requests.get(f"{GITHUB_API_BASE}/rate_limit", headers=headers, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-
-        core = data.get("resources", {}).get("core", {})
-        remaining = core.get("remaining", 0)
-        limit = core.get("limit", 0)
-        reset = core.get("reset", 0)
-
-        # Update global tracking (thread-safe)
-        with _quota_lock:
-            _api_quota_remaining = remaining
-            _api_quota_limit = limit
-            _api_quota_reset = reset
-
-        return {
-            "remaining": remaining,
-            "limit": limit,
-            "reset": reset,
+    def initialize(self, token: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Initialize quota by calling /rate_limit API.
+        Returns dict with 'remaining', 'limit', 'reset' keys.
+        """
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
         }
-    except Exception as e:
-        log_debug("Could not check rate limit: %s", e)
-        return {}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
 
+        try:
+            response = requests.get(f"{GITHUB_API_BASE}/rate_limit", headers=headers, timeout=10)
+            response.raise_for_status()
+            data = response.json()
 
-def wait_for_quota_reset() -> bool:
-    """
-    Wait until API quota resets using globally tracked reset timestamp.
-    Returns True if successfully waited, False if unable to determine reset time.
-    """
-    import time
+            core = data.get("resources", {}).get("core", {})
+            remaining = core.get("remaining", 0)
+            limit = core.get("limit", 0)
+            reset = core.get("reset", 0)
 
-    reset_timestamp = _api_quota_reset + 15  # Add 15 seconds to be safe
+            # Update tracking (thread-safe)
+            with self._lock:
+                self._remaining = remaining
+                self._limit = limit
+                self._reset = reset
 
-    if reset_timestamp == 0:
-        log_error("Cannot determine quota reset time (not initialized)")
-        return False
+            return {
+                "remaining": remaining,
+                "limit": limit,
+                "reset": reset,
+            }
+        except Exception as e:
+            logging.debug("Could not check rate limit: %s", e)
+            return {}
 
-    reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
-    now = datetime.now(timezone.utc)
-    wait_seconds = (reset_time - now).total_seconds()
+    def calculate_max_prs(self) -> int:
+        """
+        Calculate maximum number of PRs processable with current quota.
+        Reserves % of total quota to avoid complete exhaustion.
+        """
+        remaining, limit, _ = self.get_current_quota()
 
-    if wait_seconds <= 0:
-        log_info("Quota already reset, refreshing...")
-        return True
+        if limit == 0:
+            return 100  # Not initialized yet, conservative default
 
-    wait_minutes = wait_seconds / 60
-    log_info(f"Waiting {wait_minutes:.1f} minutes for quota reset...")
-    log_info(f"Will resume at {reset_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        # Reserve 5% of total quota (don't exhaust completely)
+        reserve = int(limit * API_QUOTA_RESERVE_PCT)
+        effective_buffer = max(API_SAFETY_BUFFER, reserve)
 
-    time.sleep(wait_seconds)
+        available_for_prs = max(0, remaining - effective_buffer)
+        max_prs = available_for_prs // API_CALLS_PER_PR
 
-    log_info("Quota reset complete, refreshing quota like startup...")
-    return True
+        return max_prs
 
+    def wait_for_reset(self) -> bool:
+        """
+        Wait until API quota resets.
+        Returns True if successfully waited.
+        """
+        import time
 
-def check_rate_limit(token: Optional[str] = None) -> None:
-    """Check and display current GitHub API rate limit status."""
-    rate_info = get_rate_limit_info(token)
+        remaining, limit, reset_timestamp = self.get_current_quota()
 
-    if not rate_info:
-        return
+        # Add buffer for safety
+        reset_timestamp = reset_timestamp + 15
 
-    remaining = rate_info.get("remaining", "unknown")
-    limit = rate_info.get("limit", "unknown")
-    reset_timestamp = rate_info.get("reset", 0)
+        if reset_timestamp == 0:
+            logger.error("Cannot determine quota reset time (not initialized)")
+            return False
 
-    if reset_timestamp:
         reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
         now = datetime.now(timezone.utc)
-        time_until_reset = reset_time - now
-        minutes_until_reset = time_until_reset.total_seconds() / 60
-        reset_str = f"{minutes_until_reset:.1f} minutes"
-    else:
-        reset_str = "unknown"
+        wait_seconds = (reset_time - now).total_seconds()
 
-    log_info(
-        "Rate limit: %s/%s remaining (resets in %s)",
-        remaining,
-        limit,
-        reset_str,
-    )
+        if wait_seconds <= 0:
+            logger.info("Quota already reset, refreshing...")
+            return True
+
+        wait_minutes = wait_seconds / 60
+        logger.info(f"Waiting {wait_minutes:.1f} minutes for quota reset...")
+        logger.info(f"Will resume at {reset_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+
+        time.sleep(wait_seconds)
+
+        logger.info("Quota reset complete, refreshing quota like startup...")
+        return True
+
+    def check_sufficient(
+        self, estimated_calls: int, repo_ctx: str, chunk_info: str = ""
+    ) -> tuple[bool, int]:
+        """
+        Check if sufficient API rate limit available for estimated calls.
+        Does NOT make an API call - uses current quota.
+
+        Returns (sufficient, max_prs_possible).
+        repo_ctx: Context string like "[owner/repo]" for logging
+        chunk_info: Optional string like "Page 1: " for context
+        """
+        # Use current quota (no API call unless not initialized)
+        remaining, limit, _ = self.get_current_quota()
+
+        if limit == 0:
+            # Quota not initialized yet - initialize it now (one-time API call)
+            logger.warning("[%s] Quota not initialized, fetching current status", repo_ctx)
+            rate_info = self.initialize(get_github_token())
+            if not rate_info:
+                # Failed to get quota - cannot proceed safely
+                logger.error("[%s] Failed to fetch quota, cannot verify rate limit", repo_ctx)
+                return False, 0
+            remaining = rate_info["remaining"]
+            limit = rate_info["limit"]
+
+        # Calculate max PRs we can handle
+        max_prs = self.calculate_max_prs()
+
+        # Calculate effective buffer (5% of total or fixed buffer, whichever is larger)
+        reserve = int(limit * API_QUOTA_RESERVE_PCT)
+        effective_buffer = max(API_SAFETY_BUFFER, reserve)
+
+        # Show estimated calls for this operation
+        logger.info("[%s] %sEstimated API calls: ~%d", repo_ctx, chunk_info, estimated_calls)
+
+        if remaining <= (estimated_calls + effective_buffer):
+            logger.error(
+                "[%s] %sInsufficient API rate limit: need ~%d calls + %d buffer "
+                "(reserve=%d), only %d available",
+                repo_ctx,
+                chunk_info,
+                estimated_calls,
+                effective_buffer,
+                reserve,
+                remaining,
+            )
+            logger.warning(
+                "[%s] %sCurrent quota allows processing ~%d PRs max", repo_ctx, chunk_info, max_prs
+            )
+            return False, max_prs
+
+        return True, max_prs
 
 
-def list_owner_repos(owner: str, token: Optional[str] = None) -> List[str]:
+class StateManager:
     """
-    List all repositories for an owner (user or organization).
-    Returns list of repository names.
+    Manages state file for tracking repository processing progress.
+
+    State file stores last update timestamp and CSV file path per repository.
     """
-    repos = []
-    page = 1
-    per_page = 100
 
-    # Try as organization first
-    url_base = f"{GITHUB_API_BASE}/orgs/{owner}/repos"
-    is_org = True
+    def __init__(self, state_file_path: Path = None, logger=None):
+        """Initialize state manager with path to state file and logger."""
+        self._state_file = state_file_path or STATE_FILE
+        self._logger = logger
 
-    while True:
-        params = {"page": page, "per_page": per_page, "type": "all"}
+    def load(self) -> Dict[str, Any]:
+        """Load state file containing last update dates per repo."""
+        if not self._state_file.exists():
+            return {}
 
         try:
-            response = make_github_request(url_base, token, params)
-        except GitHubAPIError as e:
-            # If org request fails with 404, try as user
-            if "not found" in str(e).lower() and is_org:
-                log_debug("Not an organization, trying as user: %s", owner)
-                url_base = f"{GITHUB_API_BASE}/users/{owner}/repos"
-                is_org = False
-                page = 1  # Reset page counter
+            with open(self._state_file, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+                return data
+        except Exception as e:
+            if self._logger:
+                self._logger.warning("Failed to load state file %s: %s", self._state_file, e)
+            return {}
+
+    def save(self, state: Dict[str, Any]) -> None:
+        """Save state file with last update dates per repo."""
+        try:
+            with open(self._state_file, "w", encoding="utf-8") as f:
+                yaml.safe_dump(state, f, default_flow_style=False, sort_keys=True)
+
+            if self._logger:
+                self._logger.debug("Saved state file to %s", self._state_file)
+        except Exception as e:
+            if self._logger:
+                self._logger.error("Failed to save state file %s: %s", self._state_file, e)
+            raise
+
+    def get_repo_remote_url(self, owner: str, repo: str) -> str:
+        """
+        Get repository remote URL key for state tracking.
+        Uses format: https://github.com/owner/repo
+        """
+        return f"https://github.com/{owner}/{repo}"
+
+    def get_repo_state(self, owner: str, repo: str) -> Optional[Dict[str, Any]]:
+        """
+        Get state for a repository (timestamp and csv_file).
+        Returns dict with 'timestamp' and 'csv_file' keys, or None if not found.
+        Raises ValueError if state is malformed.
+        """
+        state = self.load()
+        repo_key = self.get_repo_remote_url(owner, repo)
+
+        if repo_key not in state:
+            return None
+
+        entry = state[repo_key]
+
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"Invalid state format for {repo_key} in state file. "
+                f"Expected dict with 'timestamp' and 'csv_file', got {type(entry).__name__}"
+            )
+
+        timestamp_str = entry.get("timestamp", "")
+        csv_file = entry.get("csv_file")
+
+        if not timestamp_str:
+            raise ValueError(
+                f"Missing or empty 'timestamp' field for {repo_key} in state file. "
+                f"State file location: {self._state_file}"
+            )
+
+        if not csv_file:
+            raise ValueError(
+                f"Missing or empty 'csv_file' field for {repo_key} in state file. "
+                f"State file location: {self._state_file}"
+            )
+
+        try:
+            timestamp = parse_timestamp(timestamp_str)
+        except ValueError as e:
+            raise ValueError(
+                f"Invalid timestamp for {repo_key} in state file: {e}. "
+                f"State file location: {self._state_file}"
+            ) from e
+
+        return {"timestamp": timestamp, "csv_file": csv_file}
+
+    def update_repo(self, owner: str, repo: str, timestamp: datetime, csv_file: str) -> None:
+        """Update state file with new last update date and csv file for a repository."""
+        state = self.load()
+        repo_key = self.get_repo_remote_url(owner, repo)
+        # Store as UTC timestamp without timezone component
+        utc_timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
+        state[repo_key] = {"timestamp": utc_timestamp.isoformat(), "csv_file": csv_file}
+        self.save(state)
+
+    def get_all_tracked_repos(self) -> List[Dict[str, Any]]:
+        """
+        Get all tracked repositories from state file.
+        Returns list of dicts with 'url', 'owner', 'repo', 'timestamp', 'csv_file'.
+        """
+        state = self.load()
+        repos = []
+
+        for repo_url, entry in state.items():
+            # Parse URL to get owner/repo
+            # Format: https://github.com/owner/repo
+            try:
+                parts = repo_url.rstrip("/").split("/")
+                if len(parts) >= 2:
+                    owner = parts[-2]
+                    repo = parts[-1]
+
+                    if isinstance(entry, dict):
+                        timestamp = parse_timestamp(entry.get("timestamp", ""))
+                        csv_file = entry.get("csv_file")
+                    else:
+                        if self._logger:
+                            self._logger.warning("Skipping %s: invalid state format", repo_url)
+                        continue
+
+                    repos.append(
+                        {
+                            "url": repo_url,
+                            "owner": owner,
+                            "repo": repo,
+                            "timestamp": timestamp,
+                            "csv_file": csv_file,
+                        }
+                    )
+            except Exception as e:
+                if self._logger:
+                    self._logger.warning("Failed to parse state entry for %s: %s", repo_url, e)
                 continue
+
+        return repos
+
+
+class GitHubClient:
+    """
+    GitHub API client for making authenticated requests.
+
+    Handles all communication with GitHub API and automatically
+    updates quota tracking from response headers.
+    """
+
+    def __init__(self, token: Optional[str] = None, quota_manager=None, logger=None):
+        """Initialize GitHub client with optional token, quota manager, and logger."""
+        self._token = token
+        self._quota_manager = quota_manager
+        self._logger = logger
+
+    def make_request(self, url: str, params: Optional[Dict[str, Any]] = None) -> Any:
+        """Make a GitHub API request with error handling."""
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            response.raise_for_status()
+
+            # Update quota tracking from response headers
+            if self._quota_manager:
+                self._quota_manager.update_from_headers(response.headers)
+
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 403:
+                # Check if it's actually a rate limit error
+                rate_limit = e.response.headers.get("X-RateLimit-Remaining")
+                if rate_limit == "0":
+                    reset_time = e.response.headers.get("X-RateLimit-Reset", "unknown")
+                    auth_status = "authenticated" if self._token else "unauthenticated"
+                    raise GitHubAPIError(
+                        f"GitHub API rate limit exceeded ({auth_status}). "
+                        f"Rate limit resets at {reset_time}. "
+                        f"Limit: {e.response.headers.get('X-RateLimit-Limit', 'unknown')}"
+                    )
+                else:
+                    # 403 but not rate limit - likely permissions
+                    raise GitHubAPIError(
+                        "GitHub API forbidden: insufficient permissions or invalid token."
+                    )
+            elif e.response.status_code == 401:
+                raise GitHubAPIError("GitHub API unauthorized: invalid or expired token.")
+            elif e.response.status_code == 404:
+                raise GitHubAPIError("Repository not found or insufficient permissions.")
             else:
-                raise
+                raise GitHubAPIError(f"GitHub API error: {e}")
+        except requests.exceptions.RequestException as e:
+            raise GitHubAPIError(f"Network error: {e}")
 
-        if not response:
-            break
+    def fetch_prs_page(
+        self,
+        owner: str,
+        repo: str,
+        start_date: datetime,
+        end_date: datetime,
+        page: int = 1,
+        per_page: int = 100,
+    ) -> tuple[List[Dict[str, Any]], bool]:
+        """
+        Fetch a single page of pull requests sorted by updated date.
+        Returns (prs_in_range, has_more_pages).
+        """
+        url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls"
 
-        for repo in response:
-            repos.append(repo["name"])
+        params = {
+            "state": "all",
+            "sort": "updated",
+            "direction": "asc",  # Oldest first
+            "page": page,
+            "per_page": per_page,
+        }
 
-        # Break if we got fewer results than requested
-        if len(response) < per_page:
-            break
+        prs = self.make_request(url, params)
 
-        page += 1
+        if not prs:
+            return [], False
 
-    return repos
+        prs_in_range = []
+
+        for pr in prs:
+            updated_at = date_parser.parse(pr["updated_at"])
+
+            # Stop if we're before the start date
+            if updated_at < start_date:
+                return prs_in_range, False
+
+            # Only include PRs within date range
+            if start_date <= updated_at <= end_date:
+                prs_in_range.append(pr)
+
+        # If we got a full page, there might be more
+        has_more = len(prs) == per_page
+
+        return prs_in_range, has_more
+
+    def list_repos(self, owner: str) -> List[str]:
+        """
+        List all repositories for an owner (user or organization).
+        Returns list of repository names.
+        """
+        repos = []
+        page = 1
+        per_page = 100
+
+        # Try as organization first
+        url_base = f"{GITHUB_API_BASE}/orgs/{owner}/repos"
+        is_org = True
+
+        while True:
+            params = {"page": page, "per_page": per_page, "type": "all"}
+
+            try:
+                response = self.make_request(url_base, params)
+            except GitHubAPIError as e:
+                # If org request fails with 404, try as user
+                if "not found" in str(e).lower() and is_org:
+                    if self._logger:
+                        self._logger.debug("Not an organization, trying as user: %s", owner)
+                    url_base = f"{GITHUB_API_BASE}/users/{owner}/repos"
+                    is_org = False
+                    page = 1  # Reset page counter
+                    continue
+                else:
+                    raise
+
+            if not response:
+                break
+
+            for repo in response:
+                repos.append(repo["name"])
+
+            # Break if we got fewer results than requested
+            if len(response) < per_page:
+                break
+
+            page += 1
+
+        return repos
+
+    def validate_repo_access(self, owner: str, repo: str) -> bool:
+        """
+        Validate that we have access to a repository.
+        Returns True if accessible, False otherwise.
+        """
+        url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}"
+
+        try:
+            self.make_request(url)
+            return True
+        except GitHubAPIError as e:
+            if self._logger:
+                self._logger.debug("Cannot access %s/%s: %s", owner, repo, e)
+            return False
+
+    def fetch_timeline_events(self, owner: str, repo: str, pr_number: int) -> List[Dict[str, Any]]:
+        """Fetch timeline events for a PR."""
+        url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{pr_number}/events"
+        return self.make_request(url)
+
+    def fetch_issue_comments(self, comments_url: str) -> List[Dict[str, Any]]:
+        """Fetch issue comments using the comments_url from PR data."""
+        return self.make_request(comments_url)
+
+    def fetch_review_comments(self, review_comments_url: str) -> List[Dict[str, Any]]:
+        """Fetch review comments using the review_comments_url from PR data."""
+        return self.make_request(review_comments_url)
+
+    def fetch_reviews(self, owner: str, repo: str, pr_number: int) -> List[Dict[str, Any]]:
+        """Fetch reviews for a PR."""
+        url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
+        return self.make_request(url)
 
 
-def validate_repo_access(owner: str, repo: str, token: Optional[str] = None) -> bool:
+class CSVManager:
     """
-    Validate that we have access to a repository.
-    Returns True if accessible, False otherwise.
+    Manages CSV I/O operations for PR metrics.
+
+    Handles reading existing CSV files, writing metrics data,
+    and managing field definitions.
     """
-    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}"
 
-    try:
-        make_github_request(url, token)
-        return True
-    except GitHubAPIError as e:
-        log_debug("Cannot access %s/%s: %s", owner, repo, e)
-        return False
+    def __init__(self, logger=None):
+        """Initialize CSV manager with logger."""
+        self._logger = logger
 
+    def get_fieldnames(self) -> List[str]:
+        """Get CSV field names in order."""
+        return [
+            PR_NUMBER_FIELD,
+            "title",
+            "author",
+            "created_at",
+            "ready_for_review_at",
+            "merged_at",
+            "closed_at",
+            "total_comment_count",
+            "non_ai_bot_comment_count",
+            "ai_bot_comment_count",
+            "non_ai_bot_login_names",
+            "ai_bot_login_names",
+            "changes_requested_count",
+            "unique_change_requesters",
+            "approval_count",
+            "status",
+            "url",
+            "errors",
+        ]
 
-def expand_output_pattern(pattern: str, owner: str, repo: str) -> str:
-    """
-    Expand output pattern with owner and repo placeholders.
-    Supports {owner} and {repo} placeholders.
-    """
-    return pattern.replace("{owner}", owner).replace("{repo}", repo)
+    def read_csv(self, csv_file: str) -> Dict[int, Dict[str, Any]]:
+        """
+        Read existing CSV file and return dict keyed by PR number.
+        Returns empty dict if file doesn't exist or can't be read.
+        """
+        if not os.path.exists(csv_file):
+            return {}
 
+        try:
+            existing_data = {}
+            with open(csv_file, "r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    # Key by PR number for O(1) lookups
+                    pr_number = int(row[PR_NUMBER_FIELD])
+                    existing_data[pr_number] = row
 
-def make_github_request(
-    url: str, token: Optional[str] = None, params: Optional[Dict[str, Any]] = None
-) -> Any:
-    """Make a GitHub API request with error handling."""
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+            if self._logger:
+                self._logger.info("Loaded %d existing PRs from %s", len(existing_data), csv_file)
+            return existing_data
+        except Exception as e:
+            if self._logger:
+                self._logger.warning("Failed to read existing CSV %s: %s", csv_file, e)
+            return {}
 
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=30)
-        response.raise_for_status()
+    def write_csv(
+        self,
+        metrics: List[Dict[str, Any]],
+        output_file: Optional[str],
+        merge_mode: bool = False,
+        force_write: bool = False,
+    ) -> None:
+        """
+        Write metrics to CSV file or stdout.
 
-        # Update global quota tracking from response headers
-        update_quota_from_headers(response.headers)
+        If merge_mode is True and output_file exists, existing PR data is loaded,
+        updated with new metrics, and written back.
 
-        return response.json()
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 403:
-            # Check if it's actually a rate limit error
-            rate_limit = e.response.headers.get("X-RateLimit-Remaining")
-            if rate_limit == "0":
-                reset_time = e.response.headers.get("X-RateLimit-Reset", "unknown")
-                auth_status = "authenticated" if token else "unauthenticated"
-                raise GitHubAPIError(
-                    f"GitHub API rate limit exceeded ({auth_status}). "
-                    f"Rate limit resets at {reset_time}. "
-                    f"Limit: {e.response.headers.get('X-RateLimit-Limit', 'unknown')}"
+        If force_write is True, write headers even if metrics list is empty.
+        """
+        if not metrics and not force_write:
+            if self._logger:
+                self._logger.warning("No pull requests to output")
+            return
+
+        fieldnames = self.get_fieldnames()
+
+        # Merge with existing data if requested
+        if merge_mode and output_file:
+            existing_data = self.read_csv(output_file)
+
+            # Update existing data with new metrics
+            for metric in metrics:
+                pr_number = metric[PR_NUMBER_FIELD]
+                existing_data[pr_number] = metric
+
+            # Convert back to list
+            all_metrics = list(existing_data.values())
+            if self._logger:
+                self._logger.info(
+                    "Merged data: %d total PRs (%d new/updated)", len(all_metrics), len(metrics)
                 )
-            else:
-                # 403 but not rate limit - likely permissions
-                raise GitHubAPIError(
-                    "GitHub API forbidden: insufficient permissions or invalid token."
-                )
-        elif e.response.status_code == 401:
-            raise GitHubAPIError("GitHub API unauthorized: invalid or expired token.")
-        elif e.response.status_code == 404:
-            raise GitHubAPIError("Repository not found or insufficient permissions.")
         else:
-            raise GitHubAPIError(f"GitHub API error: {e}")
-    except requests.exceptions.RequestException as e:
-        raise GitHubAPIError(f"Network error: {e}")
+            all_metrics = metrics
+
+        if output_file:
+            # Write to temp file first, then atomically rename
+            output_path = Path(output_file)
+            temp_fd, temp_path = tempfile.mkstemp(
+                dir=output_path.parent if output_path.parent.exists() else tempfile.gettempdir(),
+                prefix=".tmp_pr_metrics_",
+                suffix=".csv",
+            )
+
+            try:
+                with os.fdopen(temp_fd, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(all_metrics)
+
+                # Atomic rename
+                os.rename(temp_path, output_file)
+                if self._logger:
+                    self._logger.info("Writing output to %s", output_file)
+            except Exception as e:
+                # Keep temp file for debugging
+                if self._logger:
+                    self._logger.error(
+                        "Failed to write CSV output. Temp file retained at: %s", temp_path
+                    )
+                raise e
+        else:
+            writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(all_metrics)
 
 
-def fetch_pull_requests_page(
-    owner: str,
-    repo: str,
-    start_date: datetime,
-    end_date: datetime,
-    token: Optional[str],
-    page: int = 1,
-    per_page: int = 100,
-) -> tuple[List[Dict[str, Any]], bool]:
+class LoggingManager:
     """
-    Fetch a single page of pull requests sorted by updated date.
-    Returns (prs_in_range, has_more_pages).
+    Manages application logging with quota-aware prefixes.
 
-    PRs are sorted by updated date (newest first) to enable incremental processing.
-    has_more_pages: True if there might be more PRs to fetch
+    Wraps standard logging to inject API quota status into all log messages.
     """
-    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls"
 
-    params = {
-        "state": "all",
-        "sort": "updated",  # Sort by updated, not created
-        "direction": "asc",  # Oldest first (chronological order)
-        "page": page,
-        "per_page": per_page,
-    }
+    def __init__(self, quota_manager: QuotaManager):
+        """Initialize logging manager with reference to quota manager."""
+        self._quota_manager = quota_manager
 
-    prs = make_github_request(url, token, params)
+    def info(self, msg: str, *args, **kwargs) -> None:
+        """Log INFO with API quota prefix."""
+        logging.info(f"{self._quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
 
-    if not prs:
-        return [], False
+    def warning(self, msg: str, *args, **kwargs) -> None:
+        """Log WARNING with API quota prefix."""
+        logging.warning(f"{self._quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
 
-    prs_in_range = []
+    def error(self, msg: str, *args, **kwargs) -> None:
+        """Log ERROR with API quota prefix."""
+        logging.error(f"{self._quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
 
-    for pr in prs:
-        updated_at = date_parser.parse(pr["updated_at"])
+    def debug(self, msg: str, *args, **kwargs) -> None:
+        """Log DEBUG with API quota prefix."""
+        logging.debug(f"{self._quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
 
-        # Stop if we're before the start date
-        if updated_at < start_date:
-            # No more PRs will be in range
-            return prs_in_range, False
 
-        # Only include PRs within date range
-        if start_date <= updated_at <= end_date:
-            prs_in_range.append(pr)
+# ============================================================================
+# Global Manager Instances
+# ============================================================================
 
-    # If we got a full page, there might be more
-    has_more = len(prs) == per_page
+quota_manager = QuotaManager()
+logger = LoggingManager(quota_manager)
+state_manager = StateManager(logger=logger)
+github_client = None  # Initialized in main() with token, quota_manager, and logger
+csv_manager = CSVManager(logger=logger)
 
-    return prs_in_range, has_more
+
+# ============================================================================
+# PR Processing Functions
+# ============================================================================
 
 
 def get_ready_for_review_time(
@@ -724,15 +749,14 @@ def get_ready_for_review_time(
     # If never a draft, use created_at
     if not pr.get("draft", False) and pr.get("created_at"):
         # Check events to see if it was ever a draft
-        events_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{pr['number']}/events"
         try:
-            events = make_github_request(events_url, token)
+            events = github_client.fetch_timeline_events(owner, repo, pr["number"])
             ready_events = [e for e in events if e.get("event") == "ready_for_review"]
             if ready_events:
                 # Use the latest ready_for_review event
                 return ready_events[-1]["created_at"]
         except GitHubAPIError as e:
-            log_debug("Failed to fetch events for PR #%d: %s", pr["number"], e)
+            logger.debug("Failed to fetch events for PR #%d: %s", pr["number"], e)
 
     return pr["created_at"]
 
@@ -758,7 +782,7 @@ def count_comments(
     # Issue comments (general PR comments)
     comments_url = pr["comments_url"]
     try:
-        comments = make_github_request(comments_url, token)
+        comments = github_client.fetch_issue_comments(comments_url)
         for comment in comments:
             total_comments += 1
             if comment.get("user", {}).get("type") == "Bot":
@@ -770,12 +794,12 @@ def count_comments(
                     non_ai_bot_logins.add(login)
                     non_ai_bot_comments += 1
     except GitHubAPIError as e:
-        log_debug("Failed to fetch comments for PR #%d: %s", pr["number"], e)
+        logger.debug("Failed to fetch comments for PR #%d: %s", pr["number"], e)
 
     # Review comments (inline code comments)
     review_comments_url = pr["review_comments_url"]
     try:
-        review_comments = make_github_request(review_comments_url, token)
+        review_comments = github_client.fetch_review_comments(review_comments_url)
         for comment in review_comments:
             total_comments += 1
             if comment.get("user", {}).get("type") == "Bot":
@@ -787,7 +811,7 @@ def count_comments(
                     non_ai_bot_logins.add(login)
                     non_ai_bot_comments += 1
     except GitHubAPIError as e:
-        log_debug("Failed to fetch review comments for PR #%d: %s", pr["number"], e)
+        logger.debug("Failed to fetch review comments for PR #%d: %s", pr["number"], e)
 
     # Convert to comma-separated strings, sorted for consistency
     non_ai_bot_login_names = ",".join(sorted(non_ai_bot_logins))
@@ -809,12 +833,10 @@ def get_review_metrics(
     Get review metrics: changes requested count, unique change requesters, approvals.
     Returns (changes_requested_count, unique_change_requesters, approval_count).
     """
-    reviews_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr['number']}/reviews"
-
     try:
-        reviews = make_github_request(reviews_url, token)
+        reviews = github_client.fetch_reviews(owner, repo, pr["number"])
     except GitHubAPIError as e:
-        log_debug("Failed to fetch reviews for PR #%d: %s", pr["number"], e)
+        logger.debug("Failed to fetch reviews for PR #%d: %s", pr["number"], e)
         return 0, 0, 0
 
     # Count total change requests
@@ -858,7 +880,7 @@ def process_pr(
 ) -> Dict[str, Any]:
     """Process a single PR and extract all metrics."""
     pr_number = pr["number"]
-    log_debug("Processing PR #%d: %s", pr_number, pr["title"])
+    logger.debug("Processing PR #%d: %s", pr_number, pr["title"])
 
     errors = []
     metrics: Dict[str, Any] = {
@@ -873,7 +895,7 @@ def process_pr(
     try:
         metrics["ready_for_review_at"] = get_ready_for_review_time(pr, owner, repo, token)
     except Exception as e:
-        log_debug("Error getting ready time for PR #%d: %s", pr_number, e)
+        logger.debug("Error getting ready time for PR #%d: %s", pr_number, e)
         metrics["ready_for_review_at"] = pr["created_at"]
         errors.append(f"ready_time: {e}")
 
@@ -888,7 +910,7 @@ def process_pr(
         metrics["non_ai_bot_login_names"] = non_ai_bot_names
         metrics["ai_bot_login_names"] = ai_bot_names
     except Exception as e:
-        log_debug("Error counting comments for PR #%d: %s", pr_number, e)
+        logger.debug("Error counting comments for PR #%d: %s", pr_number, e)
         metrics["total_comment_count"] = 0
         metrics["non_ai_bot_comment_count"] = 0
         metrics["ai_bot_comment_count"] = 0
@@ -903,7 +925,7 @@ def process_pr(
         metrics["unique_change_requesters"] = unique_requesters
         metrics["approval_count"] = approvals
     except Exception as e:
-        log_debug("Error getting reviews for PR #%d: %s", pr_number, e)
+        logger.debug("Error getting reviews for PR #%d: %s", pr_number, e)
         metrics["changes_requested_count"] = 0
         metrics["unique_change_requesters"] = 0
         metrics["approval_count"] = 0
@@ -922,110 +944,9 @@ def process_pr(
     return metrics
 
 
-def read_existing_csv(csv_file: str) -> Dict[int, Dict[str, Any]]:
-    """
-    Read existing CSV file and return dict keyed by PR number.
-    Returns empty dict if file doesn't exist or can't be read.
-    """
-    if not os.path.exists(csv_file):
-        return {}
-
-    try:
-        existing_data = {}
-        with open(csv_file, "r", newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                # Key by PR number for O(1) lookups
-                pr_number = int(row[PR_NUMBER_FIELD])
-                existing_data[pr_number] = row
-
-        log_info("Loaded %d existing PRs from %s", len(existing_data), csv_file)
-        return existing_data
-    except Exception as e:
-        log_warning("Failed to read existing CSV %s: %s", csv_file, e)
-        return {}
-
-
-def write_csv_output(
-    metrics: List[Dict[str, Any]],
-    output_file: Optional[str],
-    merge_mode: bool = False,
-    force_write: bool = False,
-) -> None:
-    """
-    Write metrics to CSV file or stdout.
-
-    If merge_mode is True and output_file exists, existing PR data is loaded,
-    updated with new metrics, and written back (replacing existing PRs and adding new ones).
-
-    If force_write is True, write headers even if metrics list is empty.
-    """
-    if not metrics and not force_write:
-        log_warning("No pull requests to output")
-        return
-
-    fieldnames = [
-        PR_NUMBER_FIELD,
-        "title",
-        "author",
-        "created_at",
-        "ready_for_review_at",
-        "merged_at",
-        "closed_at",
-        "total_comment_count",
-        "non_ai_bot_comment_count",
-        "ai_bot_comment_count",
-        "non_ai_bot_login_names",
-        "ai_bot_login_names",
-        "changes_requested_count",
-        "unique_change_requesters",
-        "approval_count",
-        "status",
-        "url",
-        "errors",
-    ]
-
-    # Merge with existing data if requested
-    if merge_mode and output_file:
-        existing_data = read_existing_csv(output_file)
-
-        # Update existing data with new metrics
-        for metric in metrics:
-            pr_number = metric[PR_NUMBER_FIELD]
-            existing_data[pr_number] = metric
-
-        # Convert back to list (order doesn't matter per requirements)
-        all_metrics = list(existing_data.values())
-        log_info("Merged data: %d total PRs (%d new/updated)", len(all_metrics), len(metrics))
-    else:
-        all_metrics = metrics
-
-    if output_file:
-        # Write to temp file first, then atomically rename
-        output_path = Path(output_file)
-        temp_fd, temp_path = tempfile.mkstemp(
-            dir=output_path.parent if output_path.parent.exists() else tempfile.gettempdir(),
-            prefix=".tmp_pr_metrics_",
-            suffix=".csv",
-        )
-
-        try:
-            with os.fdopen(temp_fd, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(all_metrics)
-
-            # Atomic rename
-            os.rename(temp_path, output_file)
-            log_info("Writing output to %s", output_file)
-        except Exception as e:
-            # Keep temp file for debugging, just log its location
-            log_error("Failed to write CSV output. Temp file retained at: %s", temp_path)
-            raise e
-    else:
-        writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(all_metrics)
+# ============================================================================
+# Main Business Logic
+# ============================================================================
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -1140,26 +1061,27 @@ def process_repository(
     """
     repo_ctx = f"{owner}/{repo}"
 
-    log_info("[%s] Starting processing", repo_ctx)
-    log_info("[%s] Date range: %s to %s", repo_ctx, start_date.isoformat(), end_date.isoformat())
+    logger.info("[%s] Starting processing", repo_ctx)
+    logger.info("[%s] Date range: %s to %s", repo_ctx, start_date.isoformat(), end_date.isoformat())
 
     # Check quota before starting any work
-    max_prs_can_process = calculate_max_prs_for_rate_limit()
+    max_prs_can_process = quota_manager.calculate_max_prs()
     if max_prs_can_process == 0:
-        log_error(
+        remaining, limit, _ = quota_manager.get_current_quota()
+        logger.error(
             "[%s] Cannot process any PRs with current quota (exhausted or below reserve)",
             repo_ctx,
         )
-        log_error(
+        logger.error(
             "[%s] Current quota: %d/%d remaining",
             repo_ctx,
-            _api_quota_remaining,
-            _api_quota_limit,
+            remaining,
+            limit,
         )
         # Note: per-repo wait not implemented, only at update-all level
         return 1, 0, 0
 
-    log_info(
+    logger.info(
         "[%s] Quota check: can process up to ~%d PRs before hitting reserve",
         repo_ctx,
         max_prs_can_process,
@@ -1172,35 +1094,35 @@ def process_repository(
     last_processed_timestamp = start_date
     per_page = 100
 
-    log_info("[%s] Fetching PRs sorted by updated date (oldest first)", repo_ctx)
+    logger.info("[%s] Fetching PRs sorted by updated date (oldest first)", repo_ctx)
 
     try:
         while True:
             # Fetch one page of PRs
-            prs, has_more = fetch_pull_requests_page(
-                owner, repo, start_date, end_date, token, page, per_page
+            prs, has_more = github_client.fetch_prs_page(
+                owner, repo, start_date, end_date, page, per_page
             )
             total_pages_fetched = page
 
             if not prs:
                 if page == 1:
                     # No PRs found at all
-                    log_info("[%s] No pull requests found in the specified date range", repo_ctx)
+                    logger.info("[%s] No pull requests found in the specified date range", repo_ctx)
                     pages_completed = 1  # Consider it one "empty" page completed
                 else:
                     # Exhausted PR list - update state to last processed or end_date
-                    log_info("[%s] Page %d: No more PRs in date range", repo_ctx, page)
+                    logger.info("[%s] Page %d: No more PRs in date range", repo_ctx, page)
                 # Update to end_date so we don't reprocess this range
-                update_state_file(owner, repo, end_date, output_file)
+                state_manager.update_repo(owner, repo, end_date, output_file)
                 break
 
             total_prs = len(prs)
-            log_info("[%s] Page %d: Found %d PRs", repo_ctx, page, total_prs)
+            logger.info("[%s] Page %d: Found %d PRs", repo_ctx, page, total_prs)
 
             # Check rate limit and truncate page if needed
             estimated_calls = estimate_api_calls_for_prs(total_prs)
             page_info_str = f"Page {page}: "
-            sufficient, max_prs = check_sufficient_rate_limit(
+            sufficient, max_prs = quota_manager.check_sufficient(
                 estimated_calls, repo_ctx, page_info_str
             )
 
@@ -1209,7 +1131,7 @@ def process_repository(
                 if max_prs > 0:
                     # Truncate to what we can handle
                     prs_to_process = prs[:max_prs]
-                    log_warning(
+                    logger.warning(
                         "[%s] Page %d: Truncating from %d to %d PRs due to quota limit",
                         repo_ctx,
                         page,
@@ -1222,10 +1144,10 @@ def process_repository(
                     has_more = False  # Force stop after this partial page
                 else:
                     # Can't process any PRs
-                    log_error(
+                    logger.error(
                         "[%s] Stopping at page %d due to insufficient rate limit", repo_ctx, page
                     )
-                    log_error(
+                    logger.error(
                         "[%s] Progress saved. Resume with --update (or --update-all) "
                         "after rate limit resets.",
                         repo_ctx,
@@ -1236,7 +1158,7 @@ def process_repository(
             metrics = []
             completed = 0
 
-            log_info(
+            logger.info(
                 "[%s] Page %d: Processing %d PRs with %d workers",
                 repo_ctx,
                 page,
@@ -1257,7 +1179,7 @@ def process_repository(
                     try:
                         pr_metrics = future.result()
                         metrics.append(pr_metrics)
-                        log_info(
+                        logger.info(
                             "[%s] Page %d: Completed PR %d/%d: #%d",
                             repo_ctx,
                             page,
@@ -1266,7 +1188,7 @@ def process_repository(
                             pr_number,
                         )
                     except Exception as e:
-                        log_error(
+                        logger.error(
                             "[%s] Page %d: Failed to process PR #%d: %s",
                             repo_ctx,
                             page,
@@ -1276,7 +1198,7 @@ def process_repository(
 
             # Write output for this page (always merge after first page)
             page_merge_mode = merge_mode or (page > 1)
-            write_csv_output(metrics, output_file, merge_mode=page_merge_mode)
+            csv_manager.write_csv(metrics, output_file, merge_mode=page_merge_mode)
 
             # Find the newest updated_at timestamp from this page for resume point
             if prs:
@@ -1285,10 +1207,10 @@ def process_repository(
                 last_processed_timestamp = newest_pr_updated
 
                 # Update state file with the oldest timestamp from this page
-                update_state_file(owner, repo, last_processed_timestamp, output_file)
+                state_manager.update_repo(owner, repo, last_processed_timestamp, output_file)
                 pages_completed += 1
 
-                log_info(
+                logger.info(
                     "[%s] Page %d: Processed %d PRs, updated state to %s",
                     repo_ctx,
                     page,
@@ -1298,19 +1220,19 @@ def process_repository(
 
             # Check if there are more pages
             if not has_more:
-                log_info("[%s] Reached end of PR list after %d pages", repo_ctx, page)
+                logger.info("[%s] Reached end of PR list after %d pages", repo_ctx, page)
                 break
 
             page += 1
 
     except GitHubAPIError as e:
-        log_error("[%s] Page %d: GitHub API error: %s", repo_ctx, page, e)
+        logger.error("[%s] Page %d: GitHub API error: %s", repo_ctx, page, e)
         return 1, pages_completed, total_pages_fetched
     except Exception as e:
-        log_error("[%s] Page %d: Unexpected error: %s", repo_ctx, page, e, exc_info=True)
+        logger.error("[%s] Page %d: Unexpected error: %s", repo_ctx, page, e, exc_info=True)
         return 1, pages_completed, total_pages_fetched
 
-    log_info("[%s] Successfully completed all %d pages", repo_ctx, pages_completed)
+    logger.info("[%s] Successfully completed all %d pages", repo_ctx, pages_completed)
     return 0, pages_completed, total_pages_fetched
 
 
@@ -1319,70 +1241,93 @@ def main() -> int:
     args = parse_arguments()
     setup_logging(args.debug)
 
-    log_info("GitHub PR Metrics Tool v%s", __version__)
-    log_debug("Arguments: %s", args)
+    logger.info("GitHub PR Metrics Tool v%s", __version__)
+    logger.debug("Arguments: %s", args)
 
     # Validate argument combinations
     if args.init and not args.owner:
-        log_error("--init requires --owner")
+        logger.error("--init requires --owner")
         return 1
 
     if args.init and not args.output:
-        log_error("--init requires --output (supports patterns like 'data/{owner}-{repo}.csv')")
+        logger.error("--init requires --output (supports patterns like 'data/{owner}-{repo}.csv')")
         return 1
 
     if args.init and args.end:
-        log_error("--init cannot be used with --end (uses current time)")
+        logger.error("--init cannot be used with --end (uses current time)")
         return 1
 
     if args.init and (args.update or args.update_all):
-        log_error("--init cannot be used with --update or --update-all")
+        logger.error("--init cannot be used with --update or --update-all")
         return 1
 
     if args.update and args.output:
-        log_error("--update and --output cannot be used together (update uses stored CSV path)")
+        logger.error("--update and --output cannot be used together (update uses stored CSV path)")
         return 1
 
     if args.update and (args.start or args.end):
-        log_error(
+        logger.error(
             "--update cannot be used with --start or --end (uses last update date from state)"
         )
         return 1
 
     if args.update_all and args.output:
-        log_error("--update-all and --output cannot be used together (uses stored CSV paths)")
+        logger.error("--update-all and --output cannot be used together (uses stored CSV paths)")
         return 1
 
     if args.update_all and (args.start or args.end):
-        log_error(
+        logger.error(
             "--update-all cannot be used with --start or --end (uses last update dates from state)"
         )
         return 1
 
     if args.update_all and (args.owner or args.repo):
-        log_error("--update-all cannot be used with --owner or --repo")
+        logger.error("--update-all cannot be used with --owner or --repo")
         return 1
 
     if args.update and args.update_all:
-        log_error("--update and --update-all cannot be used together")
+        logger.error("--update and --update-all cannot be used together")
         return 1
 
-    # Get GitHub token
+    # Get GitHub token and initialize client
     token = get_github_token()
+    global github_client
+    github_client = GitHubClient(token, quota_manager, logger)
+
     if not token:
-        log_warning(
+        logger.warning(
             "No GITHUB_TOKEN found. API rate limits will be restrictive "
             "for unauthenticated requests."
         )
         # Force single worker to avoid hitting rate limits too quickly
         workers = 1 if args.workers > 1 else args.workers
         if args.workers > 1:
-            log_warning("Forcing --workers=1 due to missing GITHUB_TOKEN")
+            logger.warning("Forcing --workers=1 due to missing GITHUB_TOKEN")
     else:
         workers = args.workers
 
     # Check and display rate limit status
-    check_rate_limit(token)
+    rate_info = quota_manager.initialize(token)
+    if rate_info:
+        remaining = rate_info.get("remaining", "unknown")
+        limit = rate_info.get("limit", "unknown")
+        reset_timestamp = rate_info.get("reset", 0)
+
+        if reset_timestamp:
+            reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
+            now = datetime.now(timezone.utc)
+            time_until_reset = reset_time - now
+            minutes_until_reset = time_until_reset.total_seconds() / 60
+            reset_str = f"{minutes_until_reset:.1f} minutes"
+        else:
+            reset_str = "unknown"
+
+        logger.info(
+            "Rate limit: %s/%s remaining (resets in %s)",
+            remaining,
+            limit,
+            reset_str,
+        )
 
     # Handle init mode
     if args.init:
@@ -1392,19 +1337,19 @@ def main() -> int:
         # If repo specified, just use that one
         if args.repo:
             repos_to_init = [args.repo]
-            log_info("Initializing single repository: %s/%s", owner, args.repo)
+            logger.info("Initializing single repository: %s/%s", owner, args.repo)
         else:
             # List all repos for owner
-            log_info("Listing all repositories for owner: %s", owner)
+            logger.info("Listing all repositories for owner: %s", owner)
             try:
-                repos_to_init = list_owner_repos(owner, token)
-                log_info("Found %d repositories for %s", len(repos_to_init), owner)
+                repos_to_init = github_client.list_repos(owner)
+                logger.info("Found %d repositories for %s", len(repos_to_init), owner)
             except GitHubAPIError as e:
-                log_error("Failed to list repositories for %s: %s", owner, e)
+                logger.error("Failed to list repositories for %s: %s", owner, e)
                 return 1
 
         if not repos_to_init:
-            log_error("No repositories found for owner: %s", owner)
+            logger.error("No repositories found for owner: %s", owner)
             return 1
 
         # Determine start date
@@ -1413,19 +1358,19 @@ def main() -> int:
         else:
             start_date = datetime.now(timezone.utc) - timedelta(days=DEFAULT_DAYS_BACK)
 
-        log_info("Using start date: %s", start_date.isoformat())
+        logger.info("Using start date: %s", start_date.isoformat())
 
         # Filter out already-tracked repos to get accurate count
         repos_needing_validation = []
         already_tracked_count = 0
         for repo in repos_to_init:
-            if get_repo_state(owner, repo):
+            if state_manager.get_repo_state(owner, repo):
                 already_tracked_count += 1
             else:
                 repos_needing_validation.append(repo)
 
         if already_tracked_count > 0:
-            log_info(
+            logger.info(
                 "%d repositories already tracked, %d need validation",
                 already_tracked_count,
                 len(repos_needing_validation),
@@ -1434,9 +1379,9 @@ def main() -> int:
         # Check rate limit before validating repos (1 API call per repo)
         if repos_needing_validation:
             estimated_calls = len(repos_needing_validation)
-            sufficient, _ = check_sufficient_rate_limit(estimated_calls, f"{owner}/*")
+            sufficient, _ = quota_manager.check_sufficient(estimated_calls, f"{owner}/*")
             if not sufficient:
-                log_error(
+                logger.error(
                     "Insufficient API rate limit to validate %d repositories. "
                     "Each repo requires 1 API call for access validation.",
                     len(repos_needing_validation),
@@ -1450,9 +1395,9 @@ def main() -> int:
 
         for repo in repos_to_init:
             # Check if already tracked
-            existing_state = get_repo_state(owner, repo)
+            existing_state = state_manager.get_repo_state(owner, repo)
             if existing_state:
-                log_info(
+                logger.info(
                     "[%s/%s] Already tracked (last update: %s), skipping",
                     owner,
                     repo,
@@ -1462,9 +1407,9 @@ def main() -> int:
                 continue
 
             # Validate access
-            log_info("[%s/%s] Validating access...", owner, repo)
-            if not validate_repo_access(owner, repo, token):
-                log_warning("[%s/%s] Cannot access repository, skipping", owner, repo)
+            logger.info("[%s/%s] Validating access...", owner, repo)
+            if not github_client.validate_repo_access(owner, repo):
+                logger.warning("[%s/%s] Cannot access repository, skipping", owner, repo)
                 failed += 1
                 continue
 
@@ -1474,24 +1419,24 @@ def main() -> int:
             # Create parent directory if needed
             csv_path = Path(csv_file)
             if csv_path.parent and not csv_path.parent.exists():
-                log_info("Creating directory: %s", csv_path.parent)
+                logger.info("Creating directory: %s", csv_path.parent)
                 csv_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Initialize empty CSV file
-            log_info("[%s/%s] Initializing CSV: %s", owner, repo, csv_file)
-            write_csv_output([], csv_file, merge_mode=False, force_write=True)
+            logger.info("[%s/%s] Initializing CSV: %s", owner, repo, csv_file)
+            csv_manager.write_csv([], csv_file, merge_mode=False, force_write=True)
 
             # Update state file
-            update_state_file(owner, repo, start_date, csv_file)
-            log_info("[%s/%s] Initialized (start date: %s)", owner, repo, start_date.isoformat())
+            state_manager.update_repo(owner, repo, start_date, csv_file)
+            logger.info("[%s/%s] Initialized (start date: %s)", owner, repo, start_date.isoformat())
             successful += 1
 
         # Summary
-        log_info("=" * 80)
-        log_info("Initialization complete:")
-        log_info("  Successful: %d", successful)
-        log_info("  Skipped (already tracked): %d", skipped)
-        log_info("  Failed (no access): %d", failed)
+        logger.info("=" * 80)
+        logger.info("Initialization complete:")
+        logger.info("  Successful: %d", successful)
+        logger.info("  Skipped (already tracked): %d", skipped)
+        logger.info("  Failed (no access): %d", failed)
 
         if failed > 0:
             return 1
@@ -1500,13 +1445,13 @@ def main() -> int:
     # Handle update-all mode
     if args.update_all:
         try:
-            tracked_repos = get_all_tracked_repos()
+            tracked_repos = state_manager.get_all_tracked_repos()
         except Exception as e:
-            log_error("Failed to load state file: %s", e)
+            logger.error("Failed to load state file: %s", e)
             return 1
 
         if not tracked_repos:
-            log_error(
+            logger.error(
                 "No tracked repositories found in state file. "
                 "Run without --update-all first to track repositories."
             )
@@ -1515,31 +1460,32 @@ def main() -> int:
         # Sort repositories by timestamp (oldest first)
         tracked_repos.sort(key=lambda r: r["timestamp"])
 
-        log_info("Updating %d tracked repositories", len(tracked_repos))
+        logger.info("Updating %d tracked repositories", len(tracked_repos))
 
         # Check quota before starting update-all
-        max_prs = calculate_max_prs_for_rate_limit()
+        max_prs = quota_manager.calculate_max_prs()
         if max_prs == 0:
-            log_error(
+            remaining, limit, _ = quota_manager.get_current_quota()
+            logger.error(
                 "Cannot start update-all: quota exhausted or below reserve (%d/%d remaining)",
-                _api_quota_remaining,
-                _api_quota_limit,
+                remaining,
+                limit,
             )
             if args.wait:
-                if not wait_for_quota_reset():
+                if not quota_manager.wait_for_reset():
                     return 1
                 # After waiting, refresh quota like startup
-                get_rate_limit_info(token)
-                max_prs = calculate_max_prs_for_rate_limit()
+                quota_manager.initialize(token)
+                max_prs = quota_manager.calculate_max_prs()
                 if max_prs == 0:
-                    log_error("Quota still exhausted after reset, aborting")
+                    logger.error("Quota still exhausted after reset, aborting")
                     return 1
-                log_info("Resuming update-all with refreshed quota")
+                logger.info("Resuming update-all with refreshed quota")
             else:
-                log_error("Use --wait to automatically wait for reset, or try again later")
+                logger.error("Use --wait to automatically wait for reset, or try again later")
                 return 1
 
-        log_info("Quota check: can process up to ~%d PRs total across all repos", max_prs)
+        logger.info("Quota check: can process up to ~%d PRs total across all repos", max_prs)
 
         completed_repos = 0
         partial_repo_info = None
@@ -1552,11 +1498,11 @@ def main() -> int:
             last_update = repo_info["timestamp"]
 
             if not csv_file:
-                log_warning("Skipping %s/%s: no CSV file stored in state", owner, repo)
+                logger.warning("Skipping %s/%s: no CSV file stored in state", owner, repo)
                 unprocessed_count += 1
                 continue
 
-            log_info("=" * 80)
+            logger.info("=" * 80)
 
             start_date = last_update
             end_date = datetime.now(timezone.utc)
@@ -1586,7 +1532,7 @@ def main() -> int:
                 # Count remaining repos as unprocessed
                 unprocessed_count = len(tracked_repos) - idx - 1
 
-                log_warning(
+                logger.warning(
                     "Stopping update-all: %s/%s partially completed "
                     "(%d pages processed, %d pages fetched)",
                     owner,
@@ -1597,13 +1543,13 @@ def main() -> int:
 
                 # If --wait flag set, wait for quota reset then continue
                 if args.wait:
-                    log_info("--wait flag set, will wait for quota reset and continue")
-                    if not wait_for_quota_reset():
-                        log_error("Failed to wait for quota reset, aborting")
+                    logger.info("--wait flag set, will wait for quota reset and continue")
+                    if not quota_manager.wait_for_reset():
+                        logger.error("Failed to wait for quota reset, aborting")
                         break
                     # Refresh quota like startup
-                    get_rate_limit_info(token)
-                    log_info(
+                    quota_manager.initialize(token)
+                    logger.info(
                         "Quota refreshed, continuing with remaining %d repos", unprocessed_count
                     )
                     # Don't break - continue to next repo
@@ -1611,28 +1557,28 @@ def main() -> int:
                     continue
 
                 if unprocessed_count > 0:
-                    log_warning(
+                    logger.warning(
                         "%d repositories not yet processed (will resume on next --update-all)",
                         unprocessed_count,
                     )
                 break
 
-        log_info("=" * 80)
+        logger.info("=" * 80)
 
         # Summary output
         if partial_repo_info:
-            log_info("Completed: %d repos fully processed", completed_repos)
-            log_info(
+            logger.info("Completed: %d repos fully processed", completed_repos)
+            logger.info(
                 "Partial: %s/%s (%d pages processed)",
                 partial_repo_info["owner"],
                 partial_repo_info["repo"],
                 partial_repo_info["pages_done"],
             )
             if unprocessed_count > 0:
-                log_info("Not processed: %d repos", unprocessed_count)
+                logger.info("Not processed: %d repos", unprocessed_count)
             return 1  # Incomplete
         else:
-            log_info("Successfully processed all %d repositories", completed_repos)
+            logger.info("Successfully processed all %d repositories", completed_repos)
             return 0
 
     # Get repository info
@@ -1645,7 +1591,7 @@ def main() -> int:
         repo = repo or detected_repo
 
     if not owner or not repo:
-        log_error(
+        logger.error(
             "Could not determine repository. "
             "Use --owner and --repo or run from a git repository."
         )
@@ -1654,17 +1600,17 @@ def main() -> int:
     # Handle update mode for specific repo
     if args.update:
         if not owner or not repo:
-            log_error("--update requires --owner and --repo to be specified")
+            logger.error("--update requires --owner and --repo to be specified")
             return 1
 
         try:
-            repo_state = get_repo_state(owner, repo)
+            repo_state = state_manager.get_repo_state(owner, repo)
         except ValueError as e:
-            log_error("State file validation failed: %s", e)
+            logger.error("State file validation failed: %s", e)
             return 1
 
         if not repo_state:
-            log_error(
+            logger.error(
                 "Repository %s/%s not found in state file. "
                 "Run without --update first to track this repository.",
                 owner,
@@ -1702,7 +1648,7 @@ def main() -> int:
     )
 
     if start_date >= end_date:
-        log_error("Start date must be before end date")
+        logger.error("Start date must be before end date")
         return 1
 
     # Only store state if output_file is specified (not stdout)
@@ -1718,8 +1664,8 @@ def main() -> int:
             page = 1
 
             while True:
-                prs, has_more = fetch_pull_requests_page(
-                    owner, repo, start_date, end_date, token, page
+                prs, has_more = github_client.fetch_prs_page(
+                    owner, repo, start_date, end_date, page
                 )
 
                 if prs:
@@ -1731,14 +1677,14 @@ def main() -> int:
                 page += 1
 
             if not all_prs:
-                log_warning("No pull requests found in the specified date range")
+                logger.warning("No pull requests found in the specified date range")
                 return 0
 
             metrics = []
             total_prs = len(all_prs)
             completed = 0
 
-            log_info("Processing %d PRs with %d workers", total_prs, workers)
+            logger.info("Processing %d PRs with %d workers", total_prs, workers)
 
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 future_to_pr = {
@@ -1752,20 +1698,120 @@ def main() -> int:
                     try:
                         pr_metrics = future.result()
                         metrics.append(pr_metrics)
-                        log_info("Completed PR %d/%d: #%d", completed, total_prs, pr["number"])
+                        logger.info("Completed PR %d/%d: #%d", completed, total_prs, pr["number"])
                     except Exception as e:
-                        log_error("Failed to process PR #%d: %s", pr["number"], e)
+                        logger.error("Failed to process PR #%d: %s", pr["number"], e)
 
-            write_csv_output(metrics, None, merge_mode=False)
-            log_info("Successfully processed %d pull requests", len(metrics))
+            csv_manager.write_csv(metrics, None, merge_mode=False)
+            logger.info("Successfully processed %d pull requests", len(metrics))
             return 0
 
         except GitHubAPIError as e:
-            log_error("GitHub API error: %s", e)
+            logger.error("GitHub API error: %s", e)
             return 1
         except Exception as e:
-            log_error("Unexpected error: %s", e, exc_info=args.debug)
+            logger.error("Unexpected error: %s", e, exc_info=args.debug)
             return 1
+
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+
+def setup_logging(debug: bool = False) -> None:
+    """Configure logging based on debug flag."""
+    level = logging.DEBUG if debug else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        stream=sys.stderr,
+    )
+
+
+def estimate_api_calls_for_prs(pr_count: int) -> int:
+    """
+    Estimate API calls needed to process pr_count PRs.
+    Each PR requires: timeline events, reviews, review comments, issue comments.
+    """
+    return pr_count * API_CALLS_PER_PR
+
+
+def get_github_token() -> Optional[str]:
+    """Get GitHub token from environment."""
+    return os.getenv("GITHUB_TOKEN")
+
+
+def get_repo_from_git() -> tuple[Optional[str], Optional[str]]:
+    """
+    Get repository owner and name from git config.
+    Returns (owner, repo) or (None, None) if not found.
+    """
+    try:
+        remote_url = subprocess.check_output(
+            ["git", "config", "--get", "remote.origin.url"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+
+        # Parse SSH URL (git@github.com:owner/repo.git)
+        if remote_url.startswith("git@"):
+            _, path = remote_url.split(":", 1)
+        # Parse HTTPS URL (https://github.com/owner/repo.git)
+        elif remote_url.startswith("https://"):
+            parts = remote_url.split("/")
+            if len(parts) >= 5:
+                path = f"{parts[3]}/{parts[4]}"
+            else:
+                return None, None
+        else:
+            return None, None
+
+        # Remove .git suffix
+        if path.endswith(".git"):
+            path = path[:-4]
+
+        owner, repo = path.split("/", 1)
+        return owner, repo
+    except Exception as e:
+        logger.debug("Failed to get repo from git: %s", e)
+        return None, None
+
+
+def parse_timestamp(timestamp_str: str) -> datetime:
+    """
+    Parse various timestamp formats to datetime (always returns timezone-aware).
+
+    Raises ValueError with clear message if timestamp cannot be parsed.
+    """
+    if not timestamp_str or not timestamp_str.strip():
+        raise ValueError("Timestamp string is empty or None")
+
+    try:
+        # Try Unix timestamp first
+        dt = datetime.fromtimestamp(float(timestamp_str))
+        # Make timezone-aware if naive
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, OverflowError):
+        try:
+            # Try ISO 8601 / RFC 3339
+            dt = date_parser.parse(timestamp_str)
+            # Make timezone-aware if naive
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"Invalid timestamp format: {timestamp_str}") from e
+
+
+def expand_output_pattern(pattern: str, owner: str, repo: str) -> str:
+    """
+    Expand output pattern with owner and repo placeholders.
+    Supports {owner} and {repo} placeholders.
+    """
+    return pattern.replace("{owner}", owner).replace("{repo}", repo)
 
 
 if __name__ == "__main__":

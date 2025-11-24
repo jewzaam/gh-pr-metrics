@@ -1037,6 +1037,43 @@ Environment Variables:
     return parser.parse_args()
 
 
+def show_update_all_progress_summary(
+    tracked_repos: List[Dict[str, Any]], completed_repos: int, stopped_at: Optional[str] = None
+) -> None:
+    """
+    Show progress summary for update-all operation.
+
+    Args:
+        tracked_repos: List of all tracked repositories
+        completed_repos: Number of repos completed in this pass
+        stopped_at: Optional repo name where processing stopped (if partial)
+    """
+    logger.info("=" * 80)
+    logger.info("Progress Summary:")
+
+    if stopped_at:
+        logger.info("  Completed this pass: %d repos", completed_repos)
+        logger.info("  Stopped at (partial): %s", stopped_at)
+    else:
+        logger.info("  Completed: %d repos (not started yet)", completed_repos)
+
+    # Analyze state file to show what's current
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=12)
+
+    recently_updated = 0
+    needs_processing = 0
+
+    for repo_info in tracked_repos:
+        if repo_info["timestamp"] > cutoff:
+            recently_updated += 1
+        else:
+            needs_processing += 1
+
+    logger.info("  Recently updated (< 12 hours): %d repos", recently_updated)
+    logger.info("  Needs processing (> 12 hours): %d repos", needs_processing)
+
+
 def process_repository(
     owner: str,
     repo: str,
@@ -1472,6 +1509,10 @@ def main() -> int:
                 limit,
             )
             if args.wait:
+                # Show progress summary before waiting
+                show_update_all_progress_summary(tracked_repos, 0)
+                logger.info("Will wait for quota reset, then start processing")
+
                 if not quota_manager.wait_for_reset():
                     return 1
                 # After waiting, refresh quota like startup
@@ -1522,10 +1563,10 @@ def main() -> int:
                 if exit_code == 0:
                     completed_repos += 1
                 else:
-                    # Repo failed - record and stop this pass
+                    # Repo partially processed - record and stop this pass
                     failed_repo = f"{owner}/{repo}"
                     logger.warning(
-                        "Failed to complete %s (%d pages processed)",
+                        "Partially processed %s (%d pages completed, quota exhausted)",
                         failed_repo,
                         pages_done,
                     )
@@ -1539,7 +1580,10 @@ def main() -> int:
 
             # Failed at least one repo
             if args.wait:
-                logger.info("--wait flag set, waiting for quota reset to restart from beginning")
+                # Show progress summary before waiting
+                show_update_all_progress_summary(tracked_repos, completed_repos, failed_repo)
+                logger.info("Will wait for quota reset, then restart from beginning")
+
                 if not quota_manager.wait_for_reset():
                     logger.error("Failed to wait for quota reset, aborting")
                     return 1
@@ -1549,7 +1593,7 @@ def main() -> int:
                 continue  # Restart while loop
             else:
                 logger.error(
-                    "Incomplete: processed %d repos, failed at %s. "
+                    "Incomplete: processed %d repos, stopped at %s (quota exhausted). "
                     "Use --wait to retry from beginning, or run again later.",
                     completed_repos,
                     failed_repo,

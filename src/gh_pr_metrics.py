@@ -1107,10 +1107,10 @@ def process_repository(
     Fetches PRs one page at a time (sorted by updated date), processes each page,
     and checks rate limit before fetching the next page. Saves progress after each page.
 
-    Returns (exit_code, pages_completed, total_pages_fetched).
+    Returns (exit_code, chunks_completed, total_chunks_fetched).
     exit_code: 0 on success, 1 on error/stopped
-    pages_completed: Number of pages successfully processed
-    total_pages_fetched: Total pages fetched (may be more than completed if stopped mid-page)
+    chunks_completed: Number of chunks successfully processed
+    total_chunks_fetched: Total chunks fetched (may be more than completed if stopped mid-chunk)
     """
     repo_ctx = f"{owner}/{repo}"
 
@@ -1143,8 +1143,8 @@ def process_repository(
     logger.info("[%s] Fetching PRs sorted by updated date (oldest first)", repo_ctx)
 
     # Step 1: Fetch all PRs in date range (internally descending, returns ascending)
-    total_pages_fetched = 0  # Will be calculated from PR count
-    pages_completed = 0  # Initialize early for error handlers
+    total_chunks_fetched = 0  # Will be calculated from PR count
+    chunks_completed = 0  # Initialize early for error handlers
 
     try:
         all_prs = github_client.fetch_all_prs(owner, repo, start_date, end_date)
@@ -1156,7 +1156,7 @@ def process_repository(
 
         logger.info("[%s] Collected %d PRs total", repo_ctx, len(all_prs))
         # Estimate pages fetched (for return value compatibility)
-        total_pages_fetched = (len(all_prs) + 99) // 100  # Round up
+        total_chunks_fetched = (len(all_prs) + 99) // 100  # Round up
 
         # Step 2: Process PRs in chunks with incremental saves
         # PRs are already in ascending order (oldest-first) from fetch_all_prs
@@ -1170,11 +1170,12 @@ def process_repository(
             prs_chunk = all_prs[chunk_start:chunk_end]
             total_prs = len(prs_chunk)
 
-            logger.info("[%s] Chunk %d: Processing %d PRs", repo_ctx, chunk_num, total_prs)
+            chunk_info_str = f"Chunk {chunk_num}/{total_chunks_fetched}: "
+
+            logger.info("[%s] %sProcessing %d PRs", repo_ctx, chunk_info_str, total_prs)
 
             # Check rate limit and truncate chunk if needed
             estimated_calls = estimate_api_calls_for_prs(total_prs)
-            chunk_info_str = f"Chunk {chunk_num}: "
             sufficient, max_prs = quota_manager.check_sufficient(
                 estimated_calls, repo_ctx, chunk_info_str
             )
@@ -1211,9 +1212,9 @@ def process_repository(
             completed = 0
 
             logger.info(
-                "[%s] Chunk %d: Processing %d PRs with %d workers",
+                "[%s] %sProcessing %d PRs with %d workers",
                 repo_ctx,
-                chunk_num,
+                chunk_info_str,
                 total_prs,
                 workers,
             )
@@ -1232,9 +1233,9 @@ def process_repository(
                         pr_metrics = future.result()
                         metrics.append(pr_metrics)
                         logger.info(
-                            "[%s] Chunk %d: Completed PR %d/%d: #%d (updated: %s)",
+                            "[%s] %s: Completed PR %d/%d: #%d (updated: %s)",
                             repo_ctx,
-                            chunk_num,
+                            chunk_info_str,
                             completed,
                             total_prs,
                             pr_number,
@@ -1242,9 +1243,9 @@ def process_repository(
                         )
                     except Exception as e:
                         logger.error(
-                            "[%s] Chunk %d: Failed to process PR #%d: %s",
+                            "[%s] %s: Failed to process PR #%d: %s",
                             repo_ctx,
-                            chunk_num,
+                            chunk_info_str,
                             pr_number,
                             e,
                         )
@@ -1266,11 +1267,11 @@ def process_repository(
 
             # Update state file
             state_manager.update_repo(owner, repo, last_processed_timestamp, output_file)
-            pages_completed += 1
+            chunks_completed += 1
             logger.info(
-                "[%s] Chunk %d: Processed %d PRs, updated state to %s",
+                "[%s] %s: Processed %d PRs, updated state to %s",
                 repo_ctx,
-                chunk_num,
+                chunk_info_str,
                 len(metrics),
                 last_processed_timestamp.isoformat(),
             )
@@ -1281,13 +1282,13 @@ def process_repository(
 
     except GitHubAPIError as e:
         logger.error("[%s] GitHub API error: %s", repo_ctx, e)
-        return 1, pages_completed, total_pages_fetched
+        return 1, chunks_completed, total_chunks_fetched
     except Exception as e:
         logger.error("[%s] Unexpected error: %s", repo_ctx, e, exc_info=True)
-        return 1, pages_completed, total_pages_fetched
+        return 1, chunks_completed, total_chunks_fetched
 
-    logger.info("[%s] Successfully completed all %d chunks", repo_ctx, pages_completed)
-    return 0, pages_completed, total_pages_fetched
+    logger.info("[%s] Successfully completed all %d chunks", repo_ctx, chunks_completed)
+    return 0, chunks_completed, total_chunks_fetched
 
 
 def main() -> int:
@@ -1565,7 +1566,7 @@ def main() -> int:
                 start_date = last_update
                 end_date = datetime.now(timezone.utc)
 
-                exit_code, pages_done, pages_fetched = process_repository(
+                exit_code, chunks_done, chunks_fetched = process_repository(
                     owner,
                     repo,
                     csv_file,
@@ -1585,7 +1586,7 @@ def main() -> int:
                     logger.warning(
                         "Partially processed %s (%d pages completed, quota exhausted)",
                         failed_repo,
-                        pages_done,
+                        chunks_done,
                     )
                     break
 

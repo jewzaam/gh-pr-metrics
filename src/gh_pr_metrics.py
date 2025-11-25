@@ -604,6 +604,8 @@ class CSVManager:
             "ready_for_review_at",
             "merged_at",
             "closed_at",
+            "days_open",
+            "days_in_review",
             "total_comment_count",
             "non_ai_bot_comment_count",
             "ai_bot_comment_count",
@@ -953,6 +955,33 @@ def process_pr(
     # Merged and closed timestamps
     metrics["merged_at"] = pr.get("merged_at") or ""
     metrics["closed_at"] = pr.get("closed_at") or ""
+
+    # Calculate derived time metrics
+    try:
+        created_at = date_parser.parse(pr["created_at"])
+        ready_at = date_parser.parse(metrics["ready_for_review_at"])
+
+        # Determine end time (merged, closed, or now)
+        if metrics["merged_at"]:
+            end_time = date_parser.parse(metrics["merged_at"])
+        elif metrics["closed_at"]:
+            end_time = date_parser.parse(metrics["closed_at"])
+        else:
+            end_time = datetime.now(timezone.utc)
+
+        # days_open: created → end
+        days_open = (end_time - created_at).total_seconds() / 86400
+        metrics["days_open"] = round(days_open, 2)
+
+        # days_in_review: ready_for_review → end
+        days_in_review = (end_time - ready_at).total_seconds() / 86400
+        metrics["days_in_review"] = round(days_in_review, 2)
+
+    except Exception as e:
+        logger.debug("Error calculating time metrics for PR #%d: %s", pr_number, e)
+        metrics["days_open"] = ""
+        metrics["days_in_review"] = ""
+        errors.append(f"time_metrics: {e}")
 
     # Errors
     metrics["errors"] = "; ".join(errors) if errors else ""

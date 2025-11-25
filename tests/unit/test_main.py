@@ -69,6 +69,12 @@ class TestMain:
             json=[],
         )
 
+        # Mock rate limit
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+        )
+
         with mock.patch.object(
             sys,
             "argv",
@@ -130,6 +136,12 @@ class TestMain:
             json=[],
         )
 
+        # Mock rate limit
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+        )
+
         with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all"]):
             with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
                 result = gh_pr_metrics.main()
@@ -170,7 +182,7 @@ class TestMain:
                 result = gh_pr_metrics.main()
                 assert result == 1  # Returns failure due to partial failure
 
-    def test_main_update_all_skips_repo_without_csv(self, tmp_path):
+    def test_main_update_all_skips_repo_without_csv(self, tmp_path, requests_mock):
         """Test --update-all skips repos without CSV file in state."""
         state_file = tmp_path / "state.yaml"
         csv_file = tmp_path / "repo.csv"
@@ -185,6 +197,12 @@ class TestMain:
             f"https://github.com/owner2/repo2:\n"
             f"  csv_file: {csv_file}\n"
             f"  timestamp: '2024-01-02T00:00:00Z'\n"
+        )
+
+        # Mock rate limit
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
         )
 
         with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all"]):

@@ -1237,27 +1237,26 @@ def process_repository(
             page_merge_mode = merge_mode or (page > 1)
             csv_manager.write_csv(metrics, output_file, merge_mode=page_merge_mode)
 
-            # Find the newest updated_at timestamp from this page for resume point
-            if prs:
-                # PRs are sorted by updated asc, so last one is newest (how far we got)
-                newest_pr_updated = date_parser.parse(prs[-1]["updated_at"])
-                last_processed_timestamp = newest_pr_updated
-
-                # Update state file with the oldest timestamp from this page
-                state_manager.update_repo(owner, repo, last_processed_timestamp, output_file)
-                pages_completed += 1
-
-                logger.info(
-                    "[%s] Page %d: Processed %d PRs, updated state to %s",
-                    repo_ctx,
-                    page,
-                    len(metrics),
-                    last_processed_timestamp.isoformat(),
-                )
-
+            # Find the timestamp to set in the state file
+            #   default to the updated_at of the last PR on the page
+            #   if no more pages and have sufficient quota, set to query time
+            last_processed_timestamp = date_parser.parse(prs[-1]["updated_at"]) if prs else end_date
             # Check if there are more pages
+            if not has_more and sufficient:
+                last_processed_timestamp = end_date
+
+            # Update state file
+            state_manager.update_repo(owner, repo, last_processed_timestamp, output_file)
+            pages_completed += 1
+            logger.info(
+                "[%s] Page %d: Processed %d PRs, updated state to %s",
+                repo_ctx,
+                page,
+                len(metrics),
+                last_processed_timestamp.isoformat(),
+            )
+
             if not has_more:
-                logger.info("[%s] Reached end of PR list after %d pages", repo_ctx, page)
                 break
 
             page += 1

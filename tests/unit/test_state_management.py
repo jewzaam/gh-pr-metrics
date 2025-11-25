@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from unittest import mock
 
 import gh_pr_metrics
+from gh_pr_metrics import process_repository
 
 
 class TestStateManagement:
@@ -178,3 +179,117 @@ class TestStateManagement:
             # Should only get the valid repo
             assert len(repos) == 1
             assert repos[0]["owner"] == "owner"
+
+    def test_process_repository_sets_query_time_when_complete(self, tmp_path, requests_mock):
+        """
+        Test that when all PRs are processed, state timestamp is set to
+        query time, not last PR time.
+        """
+        state_file = tmp_path / "state.yaml"
+        output_file = tmp_path / "output.csv"
+
+        # PR updated 30 days ago
+        pr_updated_at = "2024-01-01T00:00:00Z"
+        # Query made "now" (30 days later)
+        query_time = datetime(2024, 1, 31, 12, 0, 0, tzinfo=timezone.utc)
+        start_date = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+        # Mock single page with one PR (has_more=False means we processed everything)
+        requests_mock.get(
+            "https://api.github.com/repos/testowner/testrepo/pulls",
+            json=[
+                {
+                    "number": 1,
+                    "title": "Test PR",
+                    "state": "closed",
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "updated_at": pr_updated_at,
+                    "closed_at": "2024-01-01T01:00:00Z",
+                    "merged_at": "2024-01-01T01:00:00Z",
+                    "user": {"login": "testuser"},
+                    "head": {"ref": "feature"},
+                    "base": {"ref": "main"},
+                    "html_url": "https://github.com/testowner/testrepo/pull/1",
+                    "draft": False,
+                }
+            ],
+            headers={"Link": ""},  # Empty Link header = no more pages
+        )
+
+        # Mock PR details
+        requests_mock.get(
+            "https://api.github.com/repos/testowner/testrepo/pulls/1",
+            json={
+                "number": 1,
+                "title": "Test PR",
+                "state": "closed",
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": pr_updated_at,
+                "closed_at": "2024-01-01T01:00:00Z",
+                "merged_at": "2024-01-01T01:00:00Z",
+                "user": {"login": "testuser"},
+                "head": {"ref": "feature"},
+                "base": {"ref": "main"},
+                "html_url": "https://github.com/testowner/testrepo/pull/1",
+                "draft": False,
+            },
+        )
+
+        # Mock timeline, reviews, comments, commits
+        requests_mock.get(
+            "https://api.github.com/repos/testowner/testrepo/issues/1/timeline", json=[]
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/testowner/testrepo/issues/1/comments", json=[]
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/testowner/testrepo/pulls/1/reviews", json=[]
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/testowner/testrepo/pulls/1/comments", json=[]
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/testowner/testrepo/pulls/1/commits", json=[]
+        )
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+        )
+
+        # Initialize github_client for the test
+        gh_pr_metrics.github_client = gh_pr_metrics.GitHubClient(
+            "fake-token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
+
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            exit_code, pages_completed, total_pages_fetched = process_repository(
+                owner="testowner",
+                repo="testrepo",
+                output_file=str(output_file),
+                start_date=start_date,
+                end_date=query_time,
+                token="fake-token",
+                workers=1,
+                ai_bot_regex="",
+                merge_mode=False,
+            )
+
+            # Verify success
+            assert exit_code == 0
+            assert pages_completed == 1
+
+            # BUG: State timestamp should be query_time (2024-01-31T12:00:00),
+            # not pr_updated_at (2024-01-01T00:00:00)
+            state = gh_pr_metrics.state_manager.load()
+            repo_key = "https://github.com/testowner/testrepo"
+            assert repo_key in state
+            saved_timestamp = state[repo_key]["timestamp"]
+
+            # This is the bug - it saves the PR's updated_at instead of query_time
+            # Expected: "2024-01-31T12:00:00"
+            # Actual: "2024-01-01T00:00:00"
+            assert saved_timestamp == "2024-01-31T12:00:00", (
+                f"When all PRs are processed, state should be set to "
+                f"query time (2024-01-31T12:00:00), not last PR's "
+                f"updated_at (2024-01-01T00:00:00). Got: {saved_timestamp}"
+            )

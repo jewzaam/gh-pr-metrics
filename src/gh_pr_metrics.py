@@ -1232,12 +1232,13 @@ def process_repository(
                         pr_metrics = future.result()
                         metrics.append(pr_metrics)
                         logger.info(
-                            "[%s] Chunk %d: Completed PR %d/%d: #%d",
+                            "[%s] Chunk %d: Completed PR %d/%d: #%d (updated: %s)",
                             repo_ctx,
                             chunk_num,
                             completed,
                             total_prs,
                             pr_number,
+                            pr.get("updated_at", "unknown"),
                         )
                     except Exception as e:
                         logger.error(
@@ -1719,7 +1720,13 @@ def main() -> int:
                     try:
                         pr_metrics = future.result()
                         metrics.append(pr_metrics)
-                        logger.info("Completed PR %d/%d: #%d", completed, total_prs, pr["number"])
+                        logger.info(
+                            "Completed PR %d/%d: #%d (updated: %s)",
+                            completed,
+                            total_prs,
+                            pr["number"],
+                            pr.get("updated_at", "unknown"),
+                        )
                     except Exception as e:
                         logger.error("Failed to process PR #%d: %s", pr["number"], e)
 

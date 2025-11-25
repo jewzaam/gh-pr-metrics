@@ -442,51 +442,67 @@ class GitHubClient:
         except requests.exceptions.RequestException as e:
             raise GitHubAPIError(f"Network error: {e}")
 
-    def fetch_prs_page(
+    def fetch_all_prs(
         self,
         owner: str,
         repo: str,
         start_date: datetime,
         end_date: datetime,
-        page: int = 1,
-        per_page: int = 100,
-    ) -> tuple[List[Dict[str, Any]], bool]:
+    ) -> List[Dict[str, Any]]:
         """
-        Fetch a single page of pull requests sorted by updated date.
-        Returns (prs_in_range, has_more_pages).
+        Fetch all pull requests in date range, sorted by updated_at ascending.
+
+        Internally fetches descending (newest first) and stops at start_date
+        to avoid wasting API calls on old PRs. Returns PRs in ascending order.
         """
         url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls"
+        all_prs = []
+        page = 1
+        per_page = 100
 
-        params = {
-            "state": "all",
-            "sort": "updated",
-            "direction": "asc",  # Oldest first
-            "page": page,
-            "per_page": per_page,
-        }
+        while True:
+            params = {
+                "state": "all",
+                "sort": "updated",
+                "direction": "desc",  # Newest first
+                "page": page,
+                "per_page": per_page,
+            }
 
-        prs = self.make_request(url, params)
+            prs = self.make_request(url, params)
 
-        if not prs:
-            return [], False
+            if not prs:
+                break
 
-        prs_in_range = []
+            # Track if we got a full page (to know if more exist)
+            got_full_page = len(prs) == per_page
 
-        for pr in prs:
-            updated_at = date_parser.parse(pr["updated_at"])
+            for pr in prs:
+                updated_at = date_parser.parse(pr["updated_at"])
 
-            # Stop if we're before the start date
-            if updated_at < start_date:
-                return prs_in_range, False
+                # Stop if we've gone past the start date
+                if updated_at < start_date:
+                    # Found the first PR before start_date, stop fetching more
+                    # by forcing got_full_page to false
+                    got_full_page = False
+                    break
 
-            # Only include PRs within date range
-            if start_date <= updated_at <= end_date:
-                prs_in_range.append(pr)
+                # Skip PRs after end date
+                if updated_at > end_date:
+                    continue
 
-        # If we got a full page, there might be more
-        has_more = len(prs) == per_page
+                # Include PRs within date range
+                all_prs.append(pr)
 
-        return prs_in_range, has_more
+            # If we didn't get a full page, we're done
+            if not got_full_page:
+                break
+
+            page += 1
+
+        # Reverse entire collection to return oldest-first
+        all_prs.reverse()
+        return all_prs
 
     def list_repos(self, owner: str) -> List[str]:
         """
@@ -1124,81 +1140,80 @@ def process_repository(
         max_prs_can_process,
     )
 
-    # Page-based processing: fetch and process one page at a time
-    page = 1
-    pages_completed = 0
-    total_pages_fetched = 0
-    last_processed_timestamp = start_date
-    per_page = 100
-
     logger.info("[%s] Fetching PRs sorted by updated date (oldest first)", repo_ctx)
 
+    # Step 1: Fetch all PRs in date range (internally descending, returns ascending)
+    total_pages_fetched = 0  # Will be calculated from PR count
+    pages_completed = 0  # Initialize early for error handlers
+
     try:
-        while True:
-            # Fetch one page of PRs
-            prs, has_more = github_client.fetch_prs_page(
-                owner, repo, start_date, end_date, page, per_page
-            )
-            total_pages_fetched = page
+        all_prs = github_client.fetch_all_prs(owner, repo, start_date, end_date)
 
-            if not prs:
-                if page == 1:
-                    # No PRs found at all
-                    logger.info("[%s] No pull requests found in the specified date range", repo_ctx)
-                    pages_completed = 1  # Consider it one "empty" page completed
-                else:
-                    # Exhausted PR list - update state to last processed or end_date
-                    logger.info("[%s] Page %d: No more PRs in date range", repo_ctx, page)
-                # Update to end_date so we don't reprocess this range
-                state_manager.update_repo(owner, repo, end_date, output_file)
-                break
+        if not all_prs:
+            logger.info("[%s] No pull requests found in the specified date range", repo_ctx)
+            state_manager.update_repo(owner, repo, end_date, output_file)
+            return 0, 1, 0
 
-            total_prs = len(prs)
-            logger.info("[%s] Page %d: Found %d PRs", repo_ctx, page, total_prs)
+        logger.info("[%s] Collected %d PRs total", repo_ctx, len(all_prs))
+        # Estimate pages fetched (for return value compatibility)
+        total_pages_fetched = (len(all_prs) + 99) // 100  # Round up
 
-            # Check rate limit and truncate page if needed
+        # Step 2: Process PRs in chunks with incremental saves
+        # PRs are already in ascending order (oldest-first) from fetch_all_prs
+        chunk_size = 100
+        chunk_num = 0
+        last_processed_timestamp = start_date
+
+        for chunk_start in range(0, len(all_prs), chunk_size):
+            chunk_num += 1
+            chunk_end = min(chunk_start + chunk_size, len(all_prs))
+            prs_chunk = all_prs[chunk_start:chunk_end]
+            total_prs = len(prs_chunk)
+
+            logger.info("[%s] Chunk %d: Processing %d PRs", repo_ctx, chunk_num, total_prs)
+
+            # Check rate limit and truncate chunk if needed
             estimated_calls = estimate_api_calls_for_prs(total_prs)
-            page_info_str = f"Page {page}: "
+            chunk_info_str = f"Chunk {chunk_num}: "
             sufficient, max_prs = quota_manager.check_sufficient(
-                estimated_calls, repo_ctx, page_info_str
+                estimated_calls, repo_ctx, chunk_info_str
             )
 
             if not sufficient:
-                # Can't process full page, but maybe we can process some PRs
+                # Can't process full chunk, but maybe we can process some PRs
                 if max_prs > 0:
                     # Truncate to what we can handle
-                    prs_to_process = prs[:max_prs]
                     logger.warning(
-                        "[%s] Page %d: Truncating from %d to %d PRs due to quota limit",
+                        "[%s] Chunk %d: Truncating from %d to %d PRs due to quota limit",
                         repo_ctx,
-                        page,
+                        chunk_num,
                         total_prs,
                         max_prs,
                     )
-                    prs = prs_to_process
-                    total_prs = len(prs)
-                    # Will process these PRs, then stop (don't fetch more pages)
-                    has_more = False  # Force stop after this partial page
+                    prs_chunk = prs_chunk[:max_prs]
+                    total_prs = len(prs_chunk)
                 else:
                     # Can't process any PRs
                     logger.error(
-                        "[%s] Stopping at page %d due to insufficient rate limit", repo_ctx, page
+                        "[%s] Stopping at chunk %d due to insufficient rate limit",
+                        repo_ctx,
+                        chunk_num,
                     )
                     logger.error(
                         "[%s] Progress saved. Resume with --update (or --update-all) "
                         "after rate limit resets.",
                         repo_ctx,
                     )
-                    break  # Exit while loop
+                    break  # Exit for loop
 
-            # Process this page of PRs
+            # Process this chunk of PRs
             metrics = []
             completed = 0
 
             logger.info(
-                "[%s] Page %d: Processing %d PRs with %d workers",
+                "[%s] Chunk %d: Processing %d PRs with %d workers",
                 repo_ctx,
-                page,
+                chunk_num,
                 total_prs,
                 workers,
             )
@@ -1206,7 +1221,7 @@ def process_repository(
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 future_to_pr = {
                     executor.submit(process_pr, pr, owner, repo, token, ai_bot_regex): pr
-                    for pr in prs
+                    for pr in prs_chunk
                 }
 
                 for future in as_completed(future_to_pr):
@@ -1217,58 +1232,60 @@ def process_repository(
                         pr_metrics = future.result()
                         metrics.append(pr_metrics)
                         logger.info(
-                            "[%s] Page %d: Completed PR %d/%d: #%d",
+                            "[%s] Chunk %d: Completed PR %d/%d: #%d",
                             repo_ctx,
-                            page,
+                            chunk_num,
                             completed,
                             total_prs,
                             pr_number,
                         )
                     except Exception as e:
                         logger.error(
-                            "[%s] Page %d: Failed to process PR #%d: %s",
+                            "[%s] Chunk %d: Failed to process PR #%d: %s",
                             repo_ctx,
-                            page,
+                            chunk_num,
                             pr_number,
                             e,
                         )
 
-            # Write output for this page (always merge after first page)
-            page_merge_mode = merge_mode or (page > 1)
-            csv_manager.write_csv(metrics, output_file, merge_mode=page_merge_mode)
+            # Write output for this chunk (always merge after first chunk)
+            chunk_merge_mode = merge_mode or (chunk_num > 1)
+            csv_manager.write_csv(metrics, output_file, merge_mode=chunk_merge_mode)
 
             # Find the timestamp to set in the state file
-            #   default to the updated_at of the last PR on the page
-            #   if no more pages and have sufficient quota, set to query time
-            last_processed_timestamp = date_parser.parse(prs[-1]["updated_at"]) if prs else end_date
-            # Check if there are more pages
-            if not has_more and sufficient:
+            if prs_chunk:
+                # Default to the updated_at of the last PR in this chunk
+                last_processed_timestamp = date_parser.parse(prs_chunk[-1]["updated_at"])
+
+            # Check if this is the last chunk and we had sufficient quota
+            is_last_chunk = chunk_end >= len(all_prs)
+            if is_last_chunk and sufficient:
+                # Completed all PRs with sufficient quota - set to query time
                 last_processed_timestamp = end_date
 
             # Update state file
             state_manager.update_repo(owner, repo, last_processed_timestamp, output_file)
             pages_completed += 1
             logger.info(
-                "[%s] Page %d: Processed %d PRs, updated state to %s",
+                "[%s] Chunk %d: Processed %d PRs, updated state to %s",
                 repo_ctx,
-                page,
+                chunk_num,
                 len(metrics),
                 last_processed_timestamp.isoformat(),
             )
 
-            if not has_more:
+            # If quota insufficient, stop here
+            if not sufficient:
                 break
 
-            page += 1
-
     except GitHubAPIError as e:
-        logger.error("[%s] Page %d: GitHub API error: %s", repo_ctx, page, e)
+        logger.error("[%s] GitHub API error: %s", repo_ctx, e)
         return 1, pages_completed, total_pages_fetched
     except Exception as e:
-        logger.error("[%s] Page %d: Unexpected error: %s", repo_ctx, page, e, exc_info=True)
+        logger.error("[%s] Unexpected error: %s", repo_ctx, e, exc_info=True)
         return 1, pages_completed, total_pages_fetched
 
-    logger.info("[%s] Successfully completed all %d pages", repo_ctx, pages_completed)
+    logger.info("[%s] Successfully completed all %d chunks", repo_ctx, pages_completed)
     return 0, pages_completed, total_pages_fetched
 
 
@@ -1678,21 +1695,7 @@ def main() -> int:
     else:
         # stdout mode - fetch all PRs then process (no state tracking)
         try:
-            all_prs = []
-            page = 1
-
-            while True:
-                prs, has_more = github_client.fetch_prs_page(
-                    owner, repo, start_date, end_date, page
-                )
-
-                if prs:
-                    all_prs.extend(prs)
-
-                if not has_more:
-                    break
-
-                page += 1
+            all_prs = github_client.fetch_all_prs(owner, repo, start_date, end_date)
 
             if not all_prs:
                 logger.warning("No pull requests found in the specified date range")

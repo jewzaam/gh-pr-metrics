@@ -293,3 +293,46 @@ class TestStateManagement:
                 f"query time (2024-01-31T12:00:00), not last PR's "
                 f"updated_at (2024-01-01T00:00:00). Got: {saved_timestamp}"
             )
+
+    def test_process_repository_error_during_collection_has_pages_completed_defined(
+        self, tmp_path, requests_mock
+    ):
+        """
+        Test that process_repository doesn't hit UnboundLocalError when
+        error occurs during collection phase.
+        """
+        state_file = tmp_path / "state.yaml"
+        output_file = tmp_path / "output.csv"
+
+        start_date = datetime(2025, 8, 1, 0, 0, 0, tzinfo=timezone.utc)
+        end_date = datetime(2025, 11, 25, 0, 0, 0, tzinfo=timezone.utc)
+
+        # Mock request that will fail (404 error)
+        requests_mock.get("https://api.github.com/repos/testowner/testrepo/pulls", status_code=404)
+
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+        )
+
+        gh_pr_metrics.github_client = gh_pr_metrics.GitHubClient(
+            "fake-token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
+
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            exit_code, pages_completed, total_pages_fetched = process_repository(
+                owner="testowner",
+                repo="testrepo",
+                output_file=str(output_file),
+                start_date=start_date,
+                end_date=end_date,
+                token="fake-token",
+                workers=1,
+                ai_bot_regex="",
+                merge_mode=False,
+            )
+
+            # Should fail gracefully without UnboundLocalError
+            assert exit_code == 1
+            assert pages_completed == 0  # Initialized to 0
+            assert total_pages_fetched == 0  # Error before fetch completed

@@ -27,3 +27,26 @@ def isolate_state_file(tmp_path, monkeypatch):
     # Cleanup
     if test_state_file.exists():
         test_state_file.unlink()
+
+
+@pytest.fixture(autouse=True)
+def reset_quota_manager():
+    """
+    Automatically reset quota_manager to clean state for ALL tests.
+
+    Prevents tests from being affected by depleted quota state from
+    previous tests. Each test starts with fresh quota.
+    """
+    import gh_pr_metrics
+
+    # Reset quota manager to fresh state (high quota)
+    gh_pr_metrics.quota_manager._remaining = 5000
+    gh_pr_metrics.quota_manager._limit = 5000
+    gh_pr_metrics.quota_manager._reset = 1699999999  # Some future timestamp
+
+    yield
+
+    # Tests should mock rate_limit endpoint, but reset anyway for safety
+    gh_pr_metrics.quota_manager._remaining = 5000
+    gh_pr_metrics.quota_manager._limit = 5000
+    gh_pr_metrics.quota_manager._reset = 1699999999

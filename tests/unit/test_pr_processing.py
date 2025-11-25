@@ -344,3 +344,129 @@ class TestReviewMetrics:
         assert changes == 1  # Total change requests
         assert unique == 1  # Unique reviewer who requested changes
         assert approvals == 1  # Most recent state is approved
+
+
+class TestDerivedTimeMetrics:
+    """Test derived time metrics (days_open, days_in_review)."""
+
+    def test_days_open_for_merged_pr(self, requests_mock):
+        """Test days_open calculation for merged PR."""
+        pr = {
+            "number": 1,
+            "title": "Test PR",
+            "user": {"login": "testuser"},
+            "draft": False,
+            "state": "closed",
+            "created_at": "2024-01-01T00:00:00Z",
+            "merged_at": "2024-01-11T00:00:00Z",  # 10 days later
+            "closed_at": "2024-01-11T00:00:00Z",
+            "html_url": "https://github.com/owner/repo/pull/1",
+            "comments_url": "https://api.github.com/repos/owner/repo/issues/1/comments",
+            "review_comments_url": "https://api.github.com/repos/owner/repo/pulls/1/comments",
+        }
+
+        # Mock API calls
+        requests_mock.get("https://api.github.com/repos/owner/repo/issues/1/events", json=[])
+        requests_mock.get(pr["comments_url"], json=[])
+        requests_mock.get(pr["review_comments_url"], json=[])
+        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+
+        result = gh_pr_metrics.process_pr(pr, "owner", "repo", None)
+
+        assert result["days_open"] == 10.0
+        assert result["days_in_review"] == 10.0  # Never draft, so same as days_open
+
+    def test_days_in_review_excludes_draft_time(self, requests_mock):
+        """Test that days_in_review excludes draft period."""
+        pr = {
+            "number": 1,
+            "title": "Test PR",
+            "user": {"login": "testuser"},
+            "draft": False,
+            "state": "closed",
+            "created_at": "2024-01-01T00:00:00Z",
+            "merged_at": "2024-01-11T00:00:00Z",
+            "closed_at": "2024-01-11T00:00:00Z",
+            "html_url": "https://github.com/owner/repo/pull/1",
+            "comments_url": "https://api.github.com/repos/owner/repo/issues/1/comments",
+            "review_comments_url": "https://api.github.com/repos/owner/repo/pulls/1/comments",
+        }
+
+        # Mock ready_for_review event (marked ready 3 days after creation)
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/issues/1/events",
+            json=[{"event": "ready_for_review", "created_at": "2024-01-04T00:00:00Z"}],
+        )
+        requests_mock.get(pr["comments_url"], json=[])
+        requests_mock.get(pr["review_comments_url"], json=[])
+        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+
+        result = gh_pr_metrics.process_pr(pr, "owner", "repo", None)
+
+        assert result["days_open"] == 10.0  # Jan 1 → Jan 11
+        assert result["days_in_review"] == 7.0  # Jan 4 (ready) → Jan 11
+
+    def test_days_open_for_open_pr(self, requests_mock):
+        """Test days_open calculation uses current time for open PRs."""
+        from datetime import datetime, timezone
+
+        # PR created 5 days ago
+        now = datetime.now(timezone.utc)
+        from datetime import timedelta
+
+        created = now - timedelta(days=5)
+
+        pr = {
+            "number": 1,
+            "title": "Test PR",
+            "user": {"login": "testuser"},
+            "draft": False,
+            "state": "open",
+            "created_at": created.isoformat(),
+            "merged_at": None,
+            "closed_at": None,
+            "html_url": "https://github.com/owner/repo/pull/1",
+            "comments_url": "https://api.github.com/repos/owner/repo/issues/1/comments",
+            "review_comments_url": "https://api.github.com/repos/owner/repo/pulls/1/comments",
+        }
+
+        # Mock API calls
+        requests_mock.get("https://api.github.com/repos/owner/repo/issues/1/events", json=[])
+        requests_mock.get(pr["comments_url"], json=[])
+        requests_mock.get(pr["review_comments_url"], json=[])
+        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+
+        result = gh_pr_metrics.process_pr(pr, "owner", "repo", None)
+
+        # Should be approximately 5 days (allow small variance for test execution time)
+        assert 4.99 <= result["days_open"] <= 5.01
+        assert 4.99 <= result["days_in_review"] <= 5.01
+
+    def test_days_metrics_handle_errors_gracefully(self, requests_mock):
+        """Test that time metrics handle missing/invalid timestamps gracefully."""
+        pr = {
+            "number": 1,
+            "title": "Test PR",
+            "user": {"login": "testuser"},
+            "draft": False,
+            "state": "open",
+            "created_at": "invalid-date",  # Invalid timestamp
+            "merged_at": None,
+            "closed_at": None,
+            "html_url": "https://github.com/owner/repo/pull/1",
+            "comments_url": "https://api.github.com/repos/owner/repo/issues/1/comments",
+            "review_comments_url": "https://api.github.com/repos/owner/repo/pulls/1/comments",
+        }
+
+        # Mock API calls
+        requests_mock.get("https://api.github.com/repos/owner/repo/issues/1/events", json=[])
+        requests_mock.get(pr["comments_url"], json=[])
+        requests_mock.get(pr["review_comments_url"], json=[])
+        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+
+        result = gh_pr_metrics.process_pr(pr, "owner", "repo", None)
+
+        # Should have empty strings for time metrics
+        assert result["days_open"] == ""
+        assert result["days_in_review"] == ""
+        assert "time_metrics" in result["errors"]

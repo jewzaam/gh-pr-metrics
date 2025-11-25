@@ -89,34 +89,35 @@ class TestGitHubClient:
         with pytest.raises(gh_pr_metrics.GitHubAPIError, match="not found"):
             client.make_request(url)
 
-    def test_fetch_prs_page_success(self, requests_mock):
-        """Test fetching PRs page."""
+    def test_fetch_all_prs_success(self, requests_mock):
+        """Test fetching all PRs in range."""
         url = "https://api.github.com/repos/owner/repo/pulls"
         now = datetime.now(timezone.utc)
         start_date = now - timedelta(days=7)
         end_date = now
 
+        # API returns descending (newest first), but function returns ascending
         prs_data = [
-            {
-                "number": 1,
-                "updated_at": (start_date + timedelta(days=1)).isoformat(),
-                "title": "PR 1",
-            },
             {
                 "number": 2,
                 "updated_at": (start_date + timedelta(days=2)).isoformat(),
                 "title": "PR 2",
             },
+            {
+                "number": 1,
+                "updated_at": (start_date + timedelta(days=1)).isoformat(),
+                "title": "PR 1",
+            },
         ]
         requests_mock.get(url, json=prs_data)
 
         client = gh_pr_metrics.GitHubClient()
-        result, has_more = client.fetch_prs_page("owner", "repo", start_date, end_date)
+        result = client.fetch_all_prs("owner", "repo", start_date, end_date)
 
+        # Function returns PRs in ascending order (oldest first)
         assert len(result) == 2
-        assert result[0]["number"] == 1
-        assert result[1]["number"] == 2
-        assert has_more is False  # Less than 100 results
+        assert result[0]["number"] == 1  # Oldest
+        assert result[1]["number"] == 2  # Newest
 
     def test_list_repos_org(self, requests_mock):
         """Test listing repos for an organization."""
@@ -200,3 +201,135 @@ class TestGitHubClient:
 
         assert len(reviews) == 1
         assert reviews[0]["state"] == "APPROVED"
+
+    def test_fetch_all_prs_stops_at_start_date(self, requests_mock):
+        """Test that fetch_all_prs stops when hitting start_date."""
+        start_date = datetime(2025, 8, 1, 0, 0, 0, tzinfo=timezone.utc)
+        end_date = datetime(2025, 11, 25, 0, 0, 0, tzinfo=timezone.utc)
+
+        # Mock response with PRs descending: newest first, stops at start_date
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls",
+            json=[
+                {
+                    "number": 949,
+                    "title": "Newer PR",
+                    "updated_at": "2025-09-01T00:00:00Z",  # In range
+                },
+                {
+                    "number": 818,
+                    "title": "Older PR in range",
+                    "updated_at": "2025-08-15T00:00:00Z",  # In range
+                },
+                {
+                    "number": 200,
+                    "title": "Too old",
+                    "updated_at": "2025-07-20T00:00:00Z",  # Before start_date - STOP
+                },
+                {
+                    "number": 100,
+                    "title": "Even older",
+                    "updated_at": "2025-07-15T00:00:00Z",  # Shouldn't process this
+                },
+            ],
+            headers={"Link": ""},
+        )
+
+        client = gh_pr_metrics.GitHubClient(
+            "test_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
+        prs = client.fetch_all_prs("owner", "repo", start_date, end_date)
+
+        # Should return 2 PRs in ascending order (oldest first) and stop at PR 200
+        assert len(prs) == 2
+        assert prs[0]["number"] == 818  # Oldest in range
+        assert prs[1]["number"] == 949  # Newest in range
+
+    def test_fetch_all_prs_skips_prs_after_end_date(self, requests_mock):
+        """Test that fetch_all_prs skips PRs after end_date."""
+        start_date = datetime(2025, 8, 1, 0, 0, 0, tzinfo=timezone.utc)
+        end_date = datetime(2025, 10, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+        # Mock response with PRs descending: after end, in range, before start
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls",
+            json=[
+                {
+                    "number": 400,
+                    "title": "Too new",
+                    "updated_at": "2025-11-01T00:00:00Z",  # After end_date - skip
+                },
+                {
+                    "number": 300,
+                    "title": "Also too new",
+                    "updated_at": "2025-10-15T00:00:00Z",  # After end_date - skip
+                },
+                {
+                    "number": 200,
+                    "title": "In range",
+                    "updated_at": "2025-08-15T00:00:00Z",  # In range
+                },
+                {
+                    "number": 100,
+                    "title": "Too old",
+                    "updated_at": "2025-07-15T00:00:00Z",  # Before start - STOP
+                },
+            ],
+            headers={"Link": ""},
+        )
+
+        client = gh_pr_metrics.GitHubClient(
+            "test_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
+        prs = client.fetch_all_prs("owner", "repo", start_date, end_date)
+
+        # Should skip 400, 300, return 200, stop at 100
+        assert len(prs) == 1
+        assert prs[0]["number"] == 200
+
+    def test_fetch_all_prs_with_multiple_pages(self, requests_mock):
+        """
+        Test that fetch_all_prs fetches multiple pages and returns them
+        in ascending order.
+        """
+        start_date = datetime(2025, 8, 1, 0, 0, 0, tzinfo=timezone.utc)
+        end_date = datetime(2025, 10, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+        # Single page with PRs, last one triggers stop
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls",
+            json=[
+                {
+                    "number": 300,
+                    "title": "Newer PR",
+                    "updated_at": "2025-09-15T00:00:00Z",
+                },
+                {
+                    "number": 200,
+                    "title": "Middle PR",
+                    "updated_at": "2025-08-15T00:00:00Z",
+                },
+                {
+                    "number": 100,
+                    "title": "Oldest in range",
+                    "updated_at": "2025-08-05T00:00:00Z",
+                },
+                {
+                    "number": 50,
+                    "title": "Too old",
+                    "updated_at": "2025-07-15T00:00:00Z",  # Before start - STOP
+                },
+            ],
+            headers={"Link": ""},
+        )
+
+        client = gh_pr_metrics.GitHubClient(
+            "test_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
+        prs = client.fetch_all_prs("owner", "repo", start_date, end_date)
+
+        # Should return 3 PRs in ascending order (oldest first)
+        assert len(prs) == 3
+        assert prs[0]["number"] == 100  # Oldest
+        assert prs[1]["number"] == 200
+        assert prs[2]["number"] == 300  # Newest

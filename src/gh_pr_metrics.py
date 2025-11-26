@@ -1074,6 +1074,11 @@ Environment Variables:
         default="cursor\\[bot\\]",
         help="Regex pattern to identify AI bots (default: cursor\\[bot\\])",
     )
+    parser.add_argument(
+        "--log-file",
+        default="gh-pr-metrics.log",
+        help="Log file path (default: gh-pr-metrics.log in current directory)",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     if ARGCOMPLETE_AVAILABLE:
@@ -1307,7 +1312,14 @@ def process_repository(
 
             # If quota insufficient, stop here
             if not sufficient:
-                break
+                # Stopped early due to quota - return error code
+                logger.error(
+                    "[%s] Stopped at chunk %d/%d due to quota exhaustion",
+                    repo_ctx,
+                    chunks_completed,
+                    total_chunks_fetched,
+                )
+                return 1, chunks_completed, total_chunks_fetched
 
     except GitHubAPIError as e:
         logger.error("[%s] GitHub API error: %s", repo_ctx, e)
@@ -1316,6 +1328,7 @@ def process_repository(
         logger.error("[%s] Unexpected error: %s", repo_ctx, e, exc_info=True)
         return 1, chunks_completed, total_chunks_fetched
 
+    # Successfully completed all chunks
     logger.info("[%s] Successfully completed all %d chunks", repo_ctx, chunks_completed)
     return 0, chunks_completed, total_chunks_fetched
 
@@ -1323,9 +1336,10 @@ def process_repository(
 def main() -> int:
     """Main entry point."""
     args = parse_arguments()
-    setup_logging(args.debug)
+    setup_logging(args.debug, args.log_file)
 
     logger.info("GitHub PR Metrics Tool v%s", __version__)
+    logger.info("Logging to: %s", args.log_file)
     logger.debug("Arguments: %s", args)
 
     # Validate argument combinations
@@ -1371,6 +1385,10 @@ def main() -> int:
 
     if args.update and args.update_all:
         logger.error("--update and --update-all cannot be used together")
+        return 1
+
+    if args.wait and not args.update_all:
+        logger.error("--wait can only be used with --update-all")
         return 1
 
     # Get GitHub token and initialize client
@@ -1506,13 +1524,14 @@ def main() -> int:
                 logger.info("Creating directory: %s", csv_path.parent)
                 csv_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Initialize empty CSV file
-            logger.info("[%s/%s] Initializing CSV: %s", owner, repo, csv_file)
-            csv_manager.write_csv([], csv_file, merge_mode=False, force_write=True)
-
-            # Update state file
+            # Update state file (CSV will be created on first update with actual data)
             state_manager.update_repo(owner, repo, start_date, csv_file)
-            logger.info("[%s/%s] Initialized (start date: %s)", owner, repo, start_date.isoformat())
+            logger.info(
+                "[%s/%s] Initialized (start date: %s)",
+                owner,
+                repo,
+                start_date.isoformat(),
+            )
             successful += 1
 
         # Summary
@@ -1777,14 +1796,35 @@ def main() -> int:
 # ============================================================================
 
 
-def setup_logging(debug: bool = False) -> None:
-    """Configure logging based on debug flag."""
+def setup_logging(debug: bool = False, log_file: str = "gh-pr-metrics.log") -> None:
+    """Configure logging based on debug flag with file and stderr output."""
     level = logging.DEBUG if debug else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        stream=sys.stderr,
-    )
+
+    # Create formatters
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+
+    # Setup root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+
+    # Remove any existing handlers
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    # Add stderr handler
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setLevel(level)
+    stderr_handler.setFormatter(formatter)
+    root_logger.addHandler(stderr_handler)
+
+    # Add file handler
+    try:
+        file_handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+        file_handler.setLevel(level)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+    except Exception as e:
+        logging.warning(f"Could not create log file {log_file}: {e}")
 
 
 def estimate_api_calls_for_prs(pr_count: int) -> int:

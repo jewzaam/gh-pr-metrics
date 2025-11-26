@@ -262,7 +262,7 @@ class TestStateManagement:
         )
 
         with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
-            exit_code, pages_completed, total_pages_fetched = process_repository(
+            exit_code, chunks_completed, total_chunks_fetched = process_repository(
                 owner="testowner",
                 repo="testrepo",
                 output_file=str(output_file),
@@ -276,7 +276,7 @@ class TestStateManagement:
 
             # Verify success
             assert exit_code == 0
-            assert pages_completed == 1
+            assert chunks_completed == 1
 
             # BUG: State timestamp should be query_time (2024-01-31T12:00:00),
             # not pr_updated_at (2024-01-01T00:00:00)
@@ -294,7 +294,7 @@ class TestStateManagement:
                 f"updated_at (2024-01-01T00:00:00). Got: {saved_timestamp}"
             )
 
-    def test_process_repository_error_during_collection_has_pages_completed_defined(
+    def test_process_repository_error_during_collection_has_chunks_completed_defined(
         self, tmp_path, requests_mock
     ):
         """
@@ -320,7 +320,7 @@ class TestStateManagement:
         )
 
         with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
-            exit_code, pages_completed, total_pages_fetched = process_repository(
+            exit_code, chunks_completed, total_chunks_fetched = process_repository(
                 owner="testowner",
                 repo="testrepo",
                 output_file=str(output_file),
@@ -334,5 +334,5 @@ class TestStateManagement:
 
             # Should fail gracefully without UnboundLocalError
             assert exit_code == 1
-            assert pages_completed == 0  # Initialized to 0
-            assert total_pages_fetched == 0  # Error before fetch completed
+            assert chunks_completed == 0  # Initialized to 0
+            assert total_chunks_fetched == 0  # Error before fetch completed

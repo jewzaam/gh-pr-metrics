@@ -197,7 +197,7 @@ class QuotaManager:
 
         Returns (sufficient, max_prs_possible).
         repo_ctx: Context string like "[owner/repo]" for logging
-        chunk_info: Optional string like "Page 1: " for context
+        chunk_info: Optional string like "Chunk 1: " for context
         """
         # Use current quota (no API call unless not initialized)
         remaining, limit, _ = self.get_current_quota()
@@ -1276,7 +1276,7 @@ def process_repository(
             return 0, 1, 0
 
         logger.info("[%s] Collected %d PRs total", repo_ctx, len(all_prs))
-        # Estimate pages fetched (for return value compatibility)
+        # Estimate chunks fetched (for return value compatibility)
         total_chunks_fetched = (len(all_prs) + 99) // 100  # Round up
 
         # Step 2: Process PRs in chunks with incremental saves
@@ -1719,7 +1719,7 @@ def main() -> int:
                     # Repo partially processed - record and stop this pass
                     failed_repo = f"{owner}/{repo}"
                     logger.warning(
-                        "Partially processed %s (%d pages completed, quota exhausted)",
+                        "Partially processed %s (%d chunks completed, quota exhausted)",
                         failed_repo,
                         chunks_done,
                     )

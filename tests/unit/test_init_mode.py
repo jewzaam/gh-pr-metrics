@@ -109,8 +109,8 @@ class TestInitMode:
                 assert "https://github.com/testowner/testrepo" in state
                 assert state["https://github.com/testowner/testrepo"]["csv_file"] == str(csv_file)
 
-        # Verify CSV file was created
-        assert csv_file.exists()
+        # CSV file not created until first update with actual data
+        assert not csv_file.exists()
 
     def test_init_all_owner_repos(self, requests_mock, tmp_path):
         """Test initializing all repos for an owner."""
@@ -181,10 +181,10 @@ class TestInitMode:
                 assert "https://github.com/testowner/repo2" in state
                 assert "https://github.com/testowner/repo3" in state
 
-        # Verify CSV files were created
-        assert (output_dir / "testowner-repo1.csv").exists()
-        assert (output_dir / "testowner-repo2.csv").exists()
-        assert (output_dir / "testowner-repo3.csv").exists()
+        # CSV files not created until first update with actual data
+        assert not (output_dir / "testowner-repo1.csv").exists()
+        assert not (output_dir / "testowner-repo2.csv").exists()
+        assert not (output_dir / "testowner-repo3.csv").exists()
 
     def test_init_skips_inaccessible_repos(self, requests_mock, tmp_path):
         """Test that init skips repos without access."""
@@ -247,8 +247,8 @@ class TestInitMode:
                 assert len(state) == 1
                 assert "https://github.com/testowner/accessible" in state
 
-        # Verify only accessible CSV was created
-        assert (output_dir / "testowner-accessible.csv").exists()
+        # CSV files not created until first update with actual data
+        assert not (output_dir / "testowner-accessible.csv").exists()
         assert not (output_dir / "testowner-private.csv").exists()
 
     def test_init_skips_already_tracked_repos(self, requests_mock, tmp_path):

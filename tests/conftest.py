@@ -50,3 +50,31 @@ def reset_quota_manager():
     gh_pr_metrics.quota_manager._remaining = 5000
     gh_pr_metrics.quota_manager._limit = 5000
     gh_pr_metrics.quota_manager._reset = 1699999999
+
+
+@pytest.fixture(autouse=True)
+def disable_file_logging(monkeypatch):
+    """
+    Disable file logging during tests.
+
+    Tests should only log to stderr, not pollute the log file.
+    """
+    import gh_pr_metrics
+
+    # Patch setup_logging to skip file handler
+    def test_setup_logging(debug=False, log_file=None):
+        # Call original but ignore log_file argument
+        import logging
+        import sys
+
+        level = logging.DEBUG if debug else logging.INFO
+
+        # Setup only stderr handler for tests
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s - %(levelname)s - %(message)s",
+            stream=sys.stderr,
+            force=True,  # Override any existing config
+        )
+
+    monkeypatch.setattr(gh_pr_metrics, "setup_logging", test_setup_logging)

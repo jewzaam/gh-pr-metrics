@@ -187,9 +187,10 @@ This document defines the functional and non-functional requirements for a GitHu
 - **NFR4.1.3**: Write modular, testable code with clear separation of concerns
 
 #### NFR4.2: Testing
-- **NFR4.2.1**: Achieve good code coverage with unit tests (70%+ achieved)
+- **NFR4.2.1**: Achieve good code coverage with unit tests (82%+ achieved, minimum 75% enforced)
 - **NFR4.2.2**: Provide structure for integration tests (directory created for future use)
 - **NFR4.2.3**: Mock external dependencies in unit tests
+- **NFR4.2.4**: Isolate test state (state file, quota manager, file logging) via conftest.py fixtures
 
 ### NFR5: Compatibility
 

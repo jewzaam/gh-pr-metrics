@@ -256,3 +256,125 @@ class TestMain:
                 assert mock_process.call_args_list[1][0][0] == "testowner"
                 assert mock_process.call_args_list[1][0][1] == "repo1"
                 assert result == 0  # Success on retry
+
+
+class TestProcessRepository:
+    """Test process_repository function behavior."""
+
+    def test_returns_error_when_quota_exhausted_mid_processing(self, tmp_path, requests_mock):
+        """Test that process_repository returns error code when quota exhausted."""
+        state_file = tmp_path / "state.yaml"
+        output_file = tmp_path / "output.csv"
+
+        from datetime import datetime, timezone
+
+        start_date = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        end_date = datetime(2024, 1, 31, 0, 0, 0, tzinfo=timezone.utc)
+
+        # Initialize github_client
+        gh_pr_metrics.github_client = gh_pr_metrics.GitHubClient(
+            "fake", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
+
+        # Mock fetch_all_prs to return many PRs
+        with mock.patch.object(
+            gh_pr_metrics.github_client,
+            "fetch_all_prs",
+            return_value=[
+                {
+                    "number": i,
+                    "title": f"PR {i}",
+                    "updated_at": "2024-01-15T00:00:00Z",
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "state": "open",
+                    "user": {"login": "test"},
+                    "html_url": f"https://github.com/test/test/pull/{i}",
+                    "draft": False,
+                    "comments_url": f"https://api.github.com/repos/test/test/issues/{i}/comments",
+                    "review_comments_url": (
+                        f"https://api.github.com/repos/test/test/pulls/{i}/comments"
+                    ),
+                }
+                for i in range(200)  # 200 PRs = 2 chunks
+            ],
+        ):
+            # Mock quota check to fail on second chunk
+            call_count = 0
+
+            def mock_check_sufficient(estimated_calls, repo_ctx, chunk_info=""):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    return True, 50  # First chunk: sufficient
+                else:
+                    return False, 0  # Second chunk: exhausted
+
+            with mock.patch.object(
+                gh_pr_metrics.quota_manager, "check_sufficient", side_effect=mock_check_sufficient
+            ):
+                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                    # Mock process_pr to succeed quickly
+                    with mock.patch(
+                        "gh_pr_metrics.process_pr", return_value={"pr_number": 1, "title": "test"}
+                    ):
+                        exit_code, chunks_completed, total_chunks = (
+                            gh_pr_metrics.process_repository(
+                                owner="test",
+                                repo="test",
+                                output_file=str(output_file),
+                                start_date=start_date,
+                                end_date=end_date,
+                                token="fake",
+                                workers=1,
+                                ai_bot_regex="",
+                                merge_mode=False,
+                            )
+                        )
+
+        # Should return error code when stopping due to quota
+        assert exit_code == 1
+        assert chunks_completed == 1  # Only completed first chunk
+        assert total_chunks == 2  # Expected 2 chunks total
+
+    def test_no_csv_created_when_no_prs(self, tmp_path, requests_mock):
+        """Test that process_repository does not create CSV when no PRs found."""
+        state_file = tmp_path / "state.yaml"
+        output_file = tmp_path / "output.csv"
+
+        from datetime import datetime, timezone
+
+        start_date = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        end_date = datetime(2024, 1, 31, 0, 0, 0, tzinfo=timezone.utc)
+
+        # Mock empty PR list
+        requests_mock.get("https://api.github.com/repos/test/test/pulls", json=[])
+
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+        )
+
+        gh_pr_metrics.github_client = gh_pr_metrics.GitHubClient(
+            "fake", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
+
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            exit_code, chunks_completed, total_chunks = gh_pr_metrics.process_repository(
+                owner="test",
+                repo="test",
+                output_file=str(output_file),
+                start_date=start_date,
+                end_date=end_date,
+                token="fake",
+                workers=1,
+                ai_bot_regex="",
+                merge_mode=False,
+            )
+
+            # Should succeed with no PRs
+            assert exit_code == 0
+            # CSV should NOT be created
+            assert not output_file.exists()
+            # State should be updated (check inside mock context)
+            state = gh_pr_metrics.state_manager.load()
+            assert "https://github.com/test/test" in state

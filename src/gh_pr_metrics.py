@@ -1239,7 +1239,7 @@ def process_repository(
                         "after rate limit resets.",
                         repo_ctx,
                     )
-                    break  # Exit for loop
+                    return 1, chunks_completed, total_chunks_fetched
 
             # Process this chunk of PRs
             metrics = []

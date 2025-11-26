@@ -442,6 +442,93 @@ class GitHubClient:
         except requests.exceptions.RequestException as e:
             raise GitHubAPIError(f"Network error: {e}")
 
+    def _parse_link_header(self, link_header: str) -> Optional[str]:
+        """Parse Link header to extract next page URL."""
+        if not link_header:
+            return None
+
+        # Link header format: <url>; rel="next", <url>; rel="last"
+        for link in link_header.split(","):
+            if 'rel="next"' in link:
+                # Extract URL between < and >
+                start = link.find("<")
+                end = link.find(">")
+                if start != -1 and end != -1:
+                    return link[start + 1 : end]
+        return None
+
+    def _make_paginated_request(
+        self, url: str, params: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """Make paginated API requests, following Link headers."""
+        all_items = []
+        current_url = url
+        current_params = params or {}
+        current_params["per_page"] = 100  # Request maximum per page
+
+        while current_url:
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+            if self._token:
+                headers["Authorization"] = f"Bearer {self._token}"
+
+            try:
+                response = requests.get(
+                    current_url, headers=headers, params=current_params, timeout=30
+                )
+                response.raise_for_status()
+
+                # Update quota tracking
+                if self._quota_manager:
+                    self._quota_manager.update_from_headers(response.headers)
+
+                data = response.json()
+
+                # Handle both list and single item responses
+                if isinstance(data, list):
+                    all_items.extend(data)
+                else:
+                    all_items.append(data)
+                    break  # Single item, no pagination
+
+                # Check for next page
+                link_header = response.headers.get("Link", "")
+                next_url = self._parse_link_header(link_header)
+
+                if next_url:
+                    current_url = next_url
+                    current_params = None  # Next URL already includes params
+                else:
+                    break  # No more pages
+
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 403:
+                    rate_limit = e.response.headers.get("X-RateLimit-Remaining")
+                    if rate_limit == "0":
+                        reset_time = e.response.headers.get("X-RateLimit-Reset", "unknown")
+                        auth_status = "authenticated" if self._token else "unauthenticated"
+                        raise GitHubAPIError(
+                            f"GitHub API rate limit exceeded ({auth_status}). "
+                            f"Rate limit resets at {reset_time}. "
+                            f"Limit: {e.response.headers.get('X-RateLimit-Limit', 'unknown')}"
+                        )
+                    else:
+                        raise GitHubAPIError(
+                            "GitHub API forbidden: insufficient permissions or invalid token."
+                        )
+                elif e.response.status_code == 401:
+                    raise GitHubAPIError("GitHub API unauthorized: invalid or expired token.")
+                elif e.response.status_code == 404:
+                    raise GitHubAPIError("Repository not found or insufficient permissions.")
+                else:
+                    raise GitHubAPIError(f"GitHub API error: {e}")
+            except requests.exceptions.RequestException as e:
+                raise GitHubAPIError(f"Network error: {e}")
+
+        return all_items
+
     def fetch_all_prs(
         self,
         owner: str,
@@ -564,22 +651,22 @@ class GitHubClient:
             return False
 
     def fetch_timeline_events(self, owner: str, repo: str, pr_number: int) -> List[Dict[str, Any]]:
-        """Fetch timeline events for a PR."""
+        """Fetch all timeline events for a PR with pagination."""
         url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{pr_number}/events"
-        return self.make_request(url)
+        return self._make_paginated_request(url)
 
     def fetch_issue_comments(self, comments_url: str) -> List[Dict[str, Any]]:
-        """Fetch issue comments using the comments_url from PR data."""
-        return self.make_request(comments_url)
+        """Fetch all issue comments with pagination."""
+        return self._make_paginated_request(comments_url)
 
     def fetch_review_comments(self, review_comments_url: str) -> List[Dict[str, Any]]:
-        """Fetch review comments using the review_comments_url from PR data."""
-        return self.make_request(review_comments_url)
+        """Fetch all review comments with pagination."""
+        return self._make_paginated_request(review_comments_url)
 
     def fetch_reviews(self, owner: str, repo: str, pr_number: int) -> List[Dict[str, Any]]:
-        """Fetch reviews for a PR."""
+        """Fetch all reviews for a PR with pagination."""
         url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
-        return self.make_request(url)
+        return self._make_paginated_request(url)
 
 
 class CSVManager:
@@ -1724,7 +1811,8 @@ def main() -> int:
     if not args.output:
         output_file = None  # stdout
     else:
-        output_file = args.output
+        # Expand output pattern with owner/repo placeholders
+        output_file = expand_output_pattern(args.output, owner, repo)
 
     # Get time range from args or defaults
     end_date = parse_timestamp(args.end) if args.end else datetime.now(timezone.utc)
@@ -1738,6 +1826,12 @@ def main() -> int:
 
     # Only store state if output_file is specified (not stdout)
     if output_file:
+        # Create parent directory if needed
+        output_path = Path(output_file)
+        if output_path.parent and not output_path.parent.exists():
+            logger.info("Creating directory: %s", output_path.parent)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
         exit_code, _, _ = process_repository(
             owner, repo, output_file, start_date, end_date, token, workers, args.ai_bot_regex
         )

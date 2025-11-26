@@ -257,6 +257,102 @@ class TestMain:
                 assert mock_process.call_args_list[1][0][1] == "repo1"
                 assert result == 0  # Success on retry
 
+    def test_update_all_reloads_state_on_restart(self, tmp_path, requests_mock):
+        """
+        Test that update-all reloads state file on restart after quota reset.
+
+        Critical bug: Previously loaded state once and reused stale timestamps,
+        causing repos with updated timestamps to be re-processed unnecessarily.
+
+        Scenario:
+        - repo1 (old timestamp) processes successfully, updates to new timestamp
+        - repo2 (newer timestamp) fails partway, triggers restart
+        - On restart: Should pick repo2 (still older than repo1's NEW timestamp)
+        - Bug would pick repo1 again (using stale OLD timestamp from initial load)
+        """
+        state_file = tmp_path / "state.yaml"
+        csv1 = tmp_path / "repo1.csv"
+        csv2 = tmp_path / "repo2.csv"
+
+        # Initial state: repo1 is older
+        from datetime import datetime, timezone, timedelta
+
+        now = datetime.now(timezone.utc)
+        repo1_old = (now - timedelta(hours=24)).replace(tzinfo=None)
+        repo2_initial = (now - timedelta(hours=12)).replace(tzinfo=None)
+
+        state_file.write_text(
+            f"https://github.com/testowner/repo1:\n"
+            f"  csv_file: {csv1}\n"
+            f"  timestamp: '{repo1_old.isoformat()}'\n"
+            f"https://github.com/testowner/repo2:\n"
+            f"  csv_file: {csv2}\n"
+            f"  timestamp: '{repo2_initial.isoformat()}'\n"
+        )
+
+        # Create CSV files
+        csv1.write_text("pr_number,title\n")
+        csv2.write_text("pr_number,title\n")
+
+        # Mock rate limit
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+        )
+
+        # Track processing order
+        call_count = 0
+
+        def mock_process_repository(owner, repo, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+
+            # First: repo1 (oldest initially) - update to very new timestamp
+            if call_count == 1:
+                assert owner == "testowner" and repo == "repo1"
+                # Update state file: repo1 now has newest timestamp (1 hour ago)
+                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                    repo1_new = (now - timedelta(hours=1)).replace(tzinfo=None)
+                    gh_pr_metrics.state_manager.update_repo(owner, repo, repo1_new, str(csv1))
+                return 0, 1, 1
+
+            # Second: repo2 (now oldest after repo1 update) - fail to trigger restart
+            elif call_count == 2:
+                assert owner == "testowner" and repo == "repo2"
+                return 1, 0, 0  # Fail
+
+            # Third (after restart): Should be repo2 again (still oldest)
+            # If bug exists, would incorrectly be repo1 (using stale timestamp)
+            elif call_count == 3:
+                # CRITICAL ASSERTION: State was reloaded, repo2 is still oldest
+                assert (
+                    owner == "testowner" and repo == "repo2"
+                ), "Bug: Picked wrong repo on restart (state not reloaded)"
+                return 0, 1, 1
+
+            # Fourth: repo1 (now newest, processed last)
+            elif call_count == 4:
+                assert owner == "testowner" and repo == "repo1"
+                return 0, 1, 1
+
+            return 0, 1, 1
+
+        with mock.patch("gh_pr_metrics.process_repository", side_effect=mock_process_repository):
+            with mock.patch.object(
+                gh_pr_metrics.quota_manager, "wait_for_reset", return_value=True
+            ):
+                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                    with mock.patch.object(
+                        sys,
+                        "argv",
+                        ["gh-pr-metrics", "--update-all", "--wait"],
+                    ):
+                        result = gh_pr_metrics.main()
+
+        # Should process: repo1, repo2, [restart], repo2, repo1
+        assert call_count == 4
+        assert result == 0
+
 
 class TestProcessRepository:
     """Test process_repository function behavior."""

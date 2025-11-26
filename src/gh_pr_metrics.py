@@ -1397,9 +1397,9 @@ def process_repository(
                 last_processed_timestamp.isoformat(),
             )
 
-            # If quota insufficient, stop here
-            if not sufficient:
-                # Stopped early due to quota - return error code
+            # If quota insufficient and more chunks remain, stop with error
+            if not sufficient and not is_last_chunk:
+                # Stopped mid-processing due to quota - return error code
                 logger.error(
                     "[%s] Stopped at chunk %d/%d due to quota exhaustion",
                     repo_ctx,
@@ -1634,55 +1634,57 @@ def main() -> int:
 
     # Handle update-all mode
     if args.update_all:
-        try:
-            tracked_repos = state_manager.get_all_tracked_repos()
-        except Exception as e:
-            logger.error("Failed to load state file: %s", e)
-            return 1
-
-        if not tracked_repos:
-            logger.error(
-                "No tracked repositories found in state file. "
-                "Run without --update-all first to track repositories."
-            )
-            return 1
-
-        # Sort repositories by timestamp (oldest first)
-        tracked_repos.sort(key=lambda r: r["timestamp"])
-
-        logger.info("Updating %d tracked repositories", len(tracked_repos))
-
-        # Check quota before starting update-all
-        max_prs = quota_manager.calculate_max_prs()
-        if max_prs == 0:
-            remaining, limit, _ = quota_manager.get_current_quota()
-            logger.error(
-                "Cannot start update-all: quota exhausted or below reserve (%d/%d remaining)",
-                remaining,
-                limit,
-            )
-            if args.wait:
-                # Show progress summary before waiting
-                show_update_all_progress_summary(tracked_repos, 0)
-                logger.info("Will wait for quota reset, then start processing")
-
-                if not quota_manager.wait_for_reset():
-                    return 1
-                # After waiting, refresh quota like startup
-                quota_manager.initialize(token)
-                max_prs = quota_manager.calculate_max_prs()
-                if max_prs == 0:
-                    logger.error("Quota still exhausted after reset, aborting")
-                    return 1
-                logger.info("Resuming update-all with refreshed quota")
-            else:
-                logger.error("Use --wait to automatically wait for reset, or try again later")
+        # Process all repos - reload state and restart on any failure
+        while True:
+            # CRITICAL: Reload state file on each iteration to get updated timestamps
+            try:
+                tracked_repos = state_manager.get_all_tracked_repos()
+            except Exception as e:
+                logger.error("Failed to load state file: %s", e)
                 return 1
 
-        logger.info("Quota check: can process up to ~%d PRs total across all repos", max_prs)
+            if not tracked_repos:
+                logger.error(
+                    "No tracked repositories found in state file. "
+                    "Run without --update-all first to track repositories."
+                )
+                return 1
 
-        # Process all repos from beginning - restart on any failure
-        while True:
+            # Sort repositories by timestamp (oldest first)
+            tracked_repos.sort(key=lambda r: r["timestamp"])
+
+            logger.info("Updating %d tracked repositories", len(tracked_repos))
+
+            # Check quota before starting update-all
+            max_prs = quota_manager.calculate_max_prs()
+            if max_prs == 0:
+                remaining, limit, _ = quota_manager.get_current_quota()
+                logger.error(
+                    "Cannot start update-all: quota exhausted or below reserve (%d/%d remaining)",
+                    remaining,
+                    limit,
+                )
+                if args.wait:
+                    # Show progress summary before waiting
+                    show_update_all_progress_summary(tracked_repos, 0)
+                    logger.info("Will wait for quota reset, then start processing")
+
+                    if not quota_manager.wait_for_reset():
+                        return 1
+                    # After waiting, refresh quota and reload state
+                    quota_manager.initialize(token)
+                    max_prs = quota_manager.calculate_max_prs()
+                    if max_prs == 0:
+                        logger.error("Quota still exhausted after reset, aborting")
+                        return 1
+                    logger.info("Resuming update-all with refreshed quota")
+                    continue  # Restart loop to reload state
+                else:
+                    logger.error("Use --wait to automatically wait for reset, or try again later")
+                    return 1
+
+            logger.info("Quota check: can process up to ~%d PRs total across all repos", max_prs)
+
             completed_repos = 0
             failed_repo = None
 

@@ -68,7 +68,7 @@ class TestArgumentParsing:
         """Test that ai-bot-regex has a default value."""
         with mock.patch.object(sys, "argv", ["gh-pr-metrics"]):
             args = gh_pr_metrics.parse_arguments()
-            assert args.ai_bot_regex == "cursor\\[bot\\]"
+            assert args.ai_bot_regex == "cursor\\[bot\\]|claude\\[bot\\]|Copilot"
 
     def test_parse_arguments_with_ai_bot_regex(self):
         """Test parsing with custom ai-bot-regex."""
@@ -89,6 +89,18 @@ class TestArgumentParsing:
         with mock.patch.object(sys, "argv", ["gh-pr-metrics"]):
             args = gh_pr_metrics.parse_arguments()
             assert args.update is False
+
+    def test_parse_arguments_with_pr(self):
+        """Test parsing with --pr argument."""
+        with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--pr", "123"]):
+            args = gh_pr_metrics.parse_arguments()
+            assert args.pr == 123
+
+    def test_parse_arguments_pr_default(self):
+        """Test that pr defaults to None."""
+        with mock.patch.object(sys, "argv", ["gh-pr-metrics"]):
+            args = gh_pr_metrics.parse_arguments()
+            assert args.pr is None
 
 
 class TestLoggingSetup:

@@ -143,3 +143,72 @@ class TestArgumentValidation:
         ):
             result = gh_pr_metrics.main()
             assert result == 1
+
+    def test_pr_requires_output(self):
+        """Test that --pr requires --output."""
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["gh-pr-metrics", "--owner", "test", "--repo", "test", "--pr", "123"],
+        ):
+            result = gh_pr_metrics.main()
+            assert result == 1
+
+    def test_pr_cannot_use_init(self):
+        """Test that --pr cannot be used with --init."""
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "gh-pr-metrics",
+                "--owner",
+                "test",
+                "--repo",
+                "test",
+                "--pr",
+                "123",
+                "--output",
+                "test.csv",
+                "--init",
+            ],
+        ):
+            result = gh_pr_metrics.main()
+            assert result == 1
+
+    def test_pr_cannot_use_update(self):
+        """Test that --pr cannot be used with --update."""
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "gh-pr-metrics",
+                "--owner",
+                "test",
+                "--repo",
+                "test",
+                "--pr",
+                "123",
+                "--output",
+                "test.csv",
+                "--update",
+            ],
+        ):
+            result = gh_pr_metrics.main()
+            assert result == 1
+
+    def test_pr_cannot_use_update_all(self):
+        """Test that --pr cannot be used with --update-all."""
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "gh-pr-metrics",
+                "--pr",
+                "123",
+                "--output",
+                "test.csv",
+                "--update-all",
+            ],
+        ):
+            result = gh_pr_metrics.main()
+            assert result == 1

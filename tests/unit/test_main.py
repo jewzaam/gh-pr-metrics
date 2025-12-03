@@ -474,3 +474,254 @@ class TestProcessRepository:
             # State should be updated (check inside mock context)
             state = gh_pr_metrics.state_manager.load()
             assert "https://github.com/test/test" in state
+
+
+class TestUpdateSinglePR:
+    """Test update_single_pr function behavior."""
+
+    def test_update_single_pr_updates_existing_pr(self, requests_mock, tmp_path):
+        """Test that update_single_pr updates an existing PR in CSV."""
+        output_file = tmp_path / "output.csv"
+
+        # Create existing CSV with some data
+        output_file.write_text(
+            "pr_number,title,author,created_at,ready_for_review_at,merged_at,closed_at,"
+            "days_open,days_in_review,total_comment_count,non_ai_bot_comment_count,"
+            "ai_bot_comment_count,non_ai_bot_login_names,ai_bot_login_names,"
+            "changes_requested_count,unique_change_requesters,approval_count,status,url,errors\n"
+            "123,Old Title,oldauthor,2024-01-01T00:00:00Z,2024-01-01T00:00:00Z,,,"
+            "5.0,5.0,2,2,0,user1,,0,0,0,open,https://github.com/test/test/pull/123,\n"
+            "456,Another PR,author2,2024-01-02T00:00:00Z,2024-01-02T00:00:00Z,,,"
+            "3.0,3.0,1,1,0,user2,,0,0,0,open,https://github.com/test/test/pull/456,\n"
+        )
+
+        # Mock PR fetch
+        requests_mock.get(
+            "https://api.github.com/repos/testowner/testrepo/pulls/123",
+            json={
+                "number": 123,
+                "title": "Updated Title",
+                "user": {"login": "newauthor"},
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-05T00:00:00Z",
+                "draft": False,
+                "state": "open",
+                "merged_at": None,
+                "closed_at": None,
+                "html_url": "https://github.com/test/test/pull/123",
+                "comments_url": "https://api.github.com/repos/test/test/issues/123/comments",
+                "review_comments_url": "https://api.github.com/repos/test/test/pulls/123/comments",
+            },
+        )
+
+        # Mock rate limit
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+        )
+
+        # Mock timeline, comments, reviews
+        requests_mock.get(
+            "https://api.github.com/repos/testowner/testrepo/issues/123/events",
+            json=[],
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/test/test/issues/123/comments",
+            json=[],
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/test/test/pulls/123/comments",
+            json=[],
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/testowner/testrepo/pulls/123/reviews",
+            json=[],
+        )
+
+        # Initialize github_client
+        gh_pr_metrics.github_client = gh_pr_metrics.GitHubClient(
+            "fake", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
+
+        # Call update_single_pr
+        exit_code = gh_pr_metrics.update_single_pr(
+            owner="testowner",
+            repo="testrepo",
+            pr_number=123,
+            output_file=str(output_file),
+            token="fake",
+            ai_bot_regex="cursor\\[bot\\]|claude\\[bot\\]|Copilot",
+        )
+
+        assert exit_code == 0
+
+        # Read CSV and verify PR 123 was updated
+        import csv
+
+        with open(output_file, "r") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+
+        # Should still have 2 PRs
+        assert len(rows) == 2
+
+        # Find PR 123
+        pr_123 = next((r for r in rows if r["pr_number"] == "123"), None)
+        assert pr_123 is not None
+        assert pr_123["title"] == "Updated Title"
+        assert pr_123["author"] == "newauthor"
+
+        # PR 456 should be unchanged
+        pr_456 = next((r for r in rows if r["pr_number"] == "456"), None)
+        assert pr_456 is not None
+        assert pr_456["title"] == "Another PR"
+
+    def test_update_single_pr_adds_new_pr(self, requests_mock, tmp_path):
+        """Test that update_single_pr adds a new PR if not in CSV."""
+        output_file = tmp_path / "output.csv"
+
+        # Create existing CSV with some data (without PR 789)
+        output_file.write_text(
+            "pr_number,title,author,created_at,ready_for_review_at,merged_at,closed_at,"
+            "days_open,days_in_review,total_comment_count,non_ai_bot_comment_count,"
+            "ai_bot_comment_count,non_ai_bot_login_names,ai_bot_login_names,"
+            "changes_requested_count,unique_change_requesters,approval_count,status,url,errors\n"
+            "123,Old Title,oldauthor,2024-01-01T00:00:00Z,2024-01-01T00:00:00Z,,,"
+            "5.0,5.0,2,2,0,user1,,0,0,0,open,https://github.com/test/test/pull/123,\n"
+        )
+
+        # Mock PR fetch for new PR
+        requests_mock.get(
+            "https://api.github.com/repos/testowner/testrepo/pulls/789",
+            json={
+                "number": 789,
+                "title": "New PR",
+                "user": {"login": "newauthor"},
+                "created_at": "2024-01-03T00:00:00Z",
+                "updated_at": "2024-01-03T00:00:00Z",
+                "draft": False,
+                "state": "open",
+                "merged_at": None,
+                "closed_at": None,
+                "html_url": "https://github.com/test/test/pull/789",
+                "comments_url": "https://api.github.com/repos/test/test/issues/789/comments",
+                "review_comments_url": "https://api.github.com/repos/test/test/pulls/789/comments",
+            },
+        )
+
+        # Mock rate limit
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+        )
+
+        # Mock timeline, comments, reviews
+        requests_mock.get(
+            "https://api.github.com/repos/testowner/testrepo/issues/789/events",
+            json=[],
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/test/test/issues/789/comments",
+            json=[],
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/test/test/pulls/789/comments",
+            json=[],
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/testowner/testrepo/pulls/789/reviews",
+            json=[],
+        )
+
+        # Initialize github_client
+        gh_pr_metrics.github_client = gh_pr_metrics.GitHubClient(
+            "fake", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
+
+        # Call update_single_pr
+        exit_code = gh_pr_metrics.update_single_pr(
+            owner="testowner",
+            repo="testrepo",
+            pr_number=789,
+            output_file=str(output_file),
+            token="fake",
+            ai_bot_regex="cursor\\[bot\\]|claude\\[bot\\]|Copilot",
+        )
+
+        assert exit_code == 0
+
+        # Read CSV and verify PR 789 was added
+        import csv
+
+        with open(output_file, "r") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+
+        # Should now have 2 PRs
+        assert len(rows) == 2
+
+        # Find PR 789
+        pr_789 = next((r for r in rows if r["pr_number"] == "789"), None)
+        assert pr_789 is not None
+        assert pr_789["title"] == "New PR"
+        assert pr_789["author"] == "newauthor"
+
+    def test_update_single_pr_fails_if_csv_missing(self):
+        """Test that update_single_pr fails if CSV doesn't exist."""
+        # Initialize github_client
+        gh_pr_metrics.github_client = gh_pr_metrics.GitHubClient(
+            "fake", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
+
+        exit_code = gh_pr_metrics.update_single_pr(
+            owner="testowner",
+            repo="testrepo",
+            pr_number=123,
+            output_file="/nonexistent/path/output.csv",
+            token="fake",
+            ai_bot_regex="cursor\\[bot\\]",
+        )
+
+        assert exit_code == 1
+
+    def test_update_single_pr_fails_on_api_error(self, requests_mock, tmp_path):
+        """Test that update_single_pr fails gracefully on API error."""
+        output_file = tmp_path / "output.csv"
+
+        # Create existing CSV
+        output_file.write_text(
+            "pr_number,title,author,created_at,ready_for_review_at,merged_at,closed_at,"
+            "days_open,days_in_review,total_comment_count,non_ai_bot_comment_count,"
+            "ai_bot_comment_count,non_ai_bot_login_names,ai_bot_login_names,"
+            "changes_requested_count,unique_change_requesters,approval_count,status,url,errors\n"
+            "123,Old Title,oldauthor,2024-01-01T00:00:00Z,2024-01-01T00:00:00Z,,,"
+            "5.0,5.0,2,2,0,user1,,0,0,0,open,https://github.com/test/test/pull/123,\n"
+        )
+
+        # Mock PR fetch to fail
+        requests_mock.get(
+            "https://api.github.com/repos/testowner/testrepo/pulls/999",
+            status_code=404,
+        )
+
+        # Mock rate limit
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+        )
+
+        # Initialize github_client
+        gh_pr_metrics.github_client = gh_pr_metrics.GitHubClient(
+            "fake", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
+
+        exit_code = gh_pr_metrics.update_single_pr(
+            owner="testowner",
+            repo="testrepo",
+            pr_number=999,
+            output_file=str(output_file),
+            token="fake",
+            ai_bot_regex="cursor\\[bot\\]",
+        )
+
+        assert exit_code == 1

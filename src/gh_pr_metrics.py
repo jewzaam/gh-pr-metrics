@@ -668,6 +668,11 @@ class GitHubClient:
         url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
         return self._make_paginated_request(url)
 
+    def fetch_single_pr(self, owner: str, repo: str, pr_number: int) -> Dict[str, Any]:
+        """Fetch a single pull request by number."""
+        url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}"
+        return self.make_request(url)
+
 
 class CSVManager:
     """
@@ -1117,6 +1122,11 @@ Environment Variables:
     parser.add_argument("--owner", help="Repository owner (default: auto-detect from git)")
     parser.add_argument("--repo", help="Repository name (default: auto-detect from git)")
     parser.add_argument(
+        "--pr",
+        type=int,
+        help="Update a specific PR number only (surgically update existing CSV)",
+    )
+    parser.add_argument(
         "--start",
         help="Start timestamp (ISO 8601, RFC 3339, or Unix timestamp). Default: 365 days ago",
     )
@@ -1158,8 +1168,8 @@ Environment Variables:
     )
     parser.add_argument(
         "--ai-bot-regex",
-        default="cursor\\[bot\\]",
-        help="Regex pattern to identify AI bots (default: cursor\\[bot\\])",
+        default="cursor\\[bot\\]|claude\\[bot\\]|Copilot",
+        help="Regex pattern to identify AI bots (default: cursor[bot]|claude[bot]|Copilot)",
     )
     parser.add_argument(
         "--log-file",
@@ -1209,6 +1219,61 @@ def show_update_all_progress_summary(
 
     logger.info("  Recently updated (< 12 hours): %d repos", recently_updated)
     logger.info("  Needs processing (> 12 hours): %d repos", needs_processing)
+
+
+def update_single_pr(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    output_file: str,
+    token: Optional[str],
+    ai_bot_regex: str,
+) -> int:
+    """
+    Update a single PR in an existing CSV file.
+
+    Returns 0 on success, 1 on error.
+    """
+    logger.info("Fetching PR #%d from %s/%s", pr_number, owner, repo)
+
+    try:
+        pr = github_client.fetch_single_pr(owner, repo, pr_number)
+    except GitHubAPIError as e:
+        logger.error("Failed to fetch PR #%d: %s", pr_number, e)
+        return 1
+
+    logger.info("Processing PR #%d", pr_number)
+    try:
+        pr_metrics = process_pr(pr, owner, repo, token, ai_bot_regex)
+    except Exception as e:
+        logger.error("Failed to process PR #%d: %s", pr_number, e)
+        return 1
+
+    # Read existing CSV
+    if not Path(output_file).exists():
+        logger.error("CSV file not found: %s", output_file)
+        logger.error("Use regular mode first to create the CSV file")
+        return 1
+
+    # Read existing CSV as dict keyed by PR number
+    logger.info("Reading existing CSV: %s", output_file)
+    existing_data = csv_manager.read_csv(output_file)
+
+    # Update the PR in the dictionary
+    if pr_number in existing_data:
+        logger.info("Updating existing PR #%d in CSV", pr_number)
+    else:
+        logger.info("Adding new PR #%d to CSV", pr_number)
+
+    existing_data[pr_number] = pr_metrics
+
+    # Convert dict to list and write back to CSV
+    all_metrics = list(existing_data.values())
+    logger.info("Writing updated CSV: %s", output_file)
+    csv_manager.write_csv(all_metrics, output_file, merge_mode=False)
+
+    logger.info("Successfully updated PR #%d", pr_number)
+    return 0
 
 
 def process_repository(
@@ -1476,6 +1541,14 @@ def main() -> int:
 
     if args.wait and not args.update_all:
         logger.error("--wait can only be used with --update-all")
+        return 1
+
+    if args.pr and (args.init or args.update or args.update_all):
+        logger.error("--pr cannot be used with --init, --update, or --update-all")
+        return 1
+
+    if args.pr and not args.output:
+        logger.error("--pr requires --output to specify the CSV file to update")
         return 1
 
     # Get GitHub token and initialize client
@@ -1807,6 +1880,12 @@ def main() -> int:
             args.ai_bot_regex,
             merge_mode=True,
         )
+        return exit_code
+
+    # Handle single PR update mode
+    if args.pr:
+        output_file = expand_output_pattern(args.output, owner, repo)
+        exit_code = update_single_pr(owner, repo, args.pr, output_file, token, args.ai_bot_regex)
         return exit_code
 
     # Regular mode (non-update)

@@ -59,24 +59,22 @@ class TestArgumentParsing:
             assert args.workers == 8
 
     def test_parse_arguments_workers_default(self):
-        """Test that workers defaults to 4."""
+        """Test that workers defaults to None (uses config value)."""
         with mock.patch.object(sys, "argv", ["gh-pr-metrics"]):
             args = gh_pr_metrics.parse_arguments()
-            assert args.workers == 4
+            assert args.workers is None
 
-    def test_parse_arguments_ai_bot_regex_default(self):
-        """Test that ai-bot-regex has a default value."""
+    def test_parse_arguments_config_default(self):
+        """Test that config has a default value."""
         with mock.patch.object(sys, "argv", ["gh-pr-metrics"]):
             args = gh_pr_metrics.parse_arguments()
-            assert args.ai_bot_regex == "cursor\\[bot\\]|claude\\[bot\\]|Copilot"
+            assert args.config == ".gh-pr-metrics.yaml"
 
-    def test_parse_arguments_with_ai_bot_regex(self):
-        """Test parsing with custom ai-bot-regex."""
-        with mock.patch.object(
-            sys, "argv", ["gh-pr-metrics", "--ai-bot-regex", "copilot\\[bot\\]|cursor\\[bot\\]"]
-        ):
+    def test_parse_arguments_with_config(self):
+        """Test parsing with custom config path."""
+        with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--config", "/path/to/config.yaml"]):
             args = gh_pr_metrics.parse_arguments()
-            assert args.ai_bot_regex == "copilot\\[bot\\]|cursor\\[bot\\]"
+            assert args.config == "/path/to/config.yaml"
 
     def test_parse_arguments_with_update(self):
         """Test parsing with update flag."""

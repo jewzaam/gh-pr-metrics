@@ -78,3 +78,33 @@ def disable_file_logging(monkeypatch):
         )
 
     monkeypatch.setattr(gh_pr_metrics, "setup_logging", test_setup_logging)
+
+
+@pytest.fixture
+def default_config():
+    """
+    Provide a default Config object for tests.
+
+    Uses the same default values as the production config file.
+    """
+    import gh_pr_metrics
+
+    config_dict = {
+        "ai_bots": {
+            "always": ["cursor\\[bot\\]", "claude\\[bot\\]", "Copilot"],
+            "conditional": [
+                {
+                    "name": "github-actions\\[bot\\]",
+                    "content_patterns": ["Code Review Summary", "Files Reviewed"],
+                    "match_any": True,
+                }
+            ],
+        },
+        "workers": 4,
+        "output_pattern": None,
+        "log_file": "gh-pr-metrics.log",
+        "default_days_back": 365,
+        "quota": {"reserve": 100, "min_buffer": 50},
+    }
+
+    return gh_pr_metrics.Config(config_dict)

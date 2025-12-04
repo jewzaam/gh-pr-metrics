@@ -180,7 +180,9 @@ class TestStateManagement:
             assert len(repos) == 1
             assert repos[0]["owner"] == "owner"
 
-    def test_process_repository_sets_query_time_when_complete(self, tmp_path, requests_mock):
+    def test_process_repository_sets_query_time_when_complete(
+        self, tmp_path, requests_mock, default_config
+    ):
         """
         Test that when all PRs are processed, state timestamp is set to
         query time, not last PR time.
@@ -270,7 +272,7 @@ class TestStateManagement:
                 end_date=query_time,
                 token="fake-token",
                 workers=1,
-                ai_bot_regex="",
+                config=default_config,
                 merge_mode=False,
             )
 
@@ -295,7 +297,7 @@ class TestStateManagement:
             )
 
     def test_process_repository_error_during_collection_has_chunks_completed_defined(
-        self, tmp_path, requests_mock
+        self, tmp_path, requests_mock, default_config
     ):
         """
         Test that process_repository doesn't hit UnboundLocalError when
@@ -328,7 +330,7 @@ class TestStateManagement:
                 end_date=end_date,
                 token="fake-token",
                 workers=1,
-                ai_bot_regex="",
+                config=default_config,
                 merge_mode=False,
             )
 

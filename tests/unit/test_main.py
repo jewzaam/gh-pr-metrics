@@ -12,14 +12,15 @@ import gh_pr_metrics
 class TestMain:
     """Test main application entry point."""
 
-    def test_main_returns_error_without_repo(self):
+    def test_main_returns_error_without_repo(self, default_config):
         """Test that main() returns error when repo cannot be determined."""
         with mock.patch.object(sys, "argv", ["gh-pr-metrics"]):
-            with mock.patch("gh_pr_metrics.get_repo_from_git", return_value=(None, None)):
-                result = gh_pr_metrics.main()
-                assert result == 1
+            with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
+                with mock.patch("gh_pr_metrics.get_repo_from_git", return_value=(None, None)):
+                    result = gh_pr_metrics.main()
+                    assert result == 1
 
-    def test_main_with_explicit_repo(self, requests_mock):
+    def test_main_with_explicit_repo(self, requests_mock, default_config):
         """Test main with explicitly specified repo."""
         # Mock the GitHub API to return empty PRs list
         requests_mock.get(
@@ -32,23 +33,25 @@ class TestMain:
             "argv",
             ["gh-pr-metrics", "--owner", "testowner", "--repo", "testrepo"],
         ):
-            result = gh_pr_metrics.main()
-            assert result == 0
+            with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
+                result = gh_pr_metrics.main()
+                assert result == 0
 
-    def test_main_update_mode_requires_output(self):
+    def test_main_update_mode_requires_output(self, default_config):
         """Test that update mode requires --output flag."""
         with mock.patch.object(
             sys,
             "argv",
             ["gh-pr-metrics", "--owner", "testowner", "--repo", "testrepo", "--update"],
         ):
-            with mock.patch(
-                "gh_pr_metrics.get_repo_from_git", return_value=("testowner", "testrepo")
-            ):
-                result = gh_pr_metrics.main()
-                assert result == 1
+            with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
+                with mock.patch(
+                    "gh_pr_metrics.get_repo_from_git", return_value=("testowner", "testrepo")
+                ):
+                    result = gh_pr_metrics.main()
+                    assert result == 1
 
-    def test_main_update_mode_with_existing_state(self, requests_mock, tmp_path):
+    def test_main_update_mode_with_existing_state(self, requests_mock, tmp_path, default_config):
         """Test update mode uses last update date from state file."""
         state_file = tmp_path / "state.yaml"
         output_file = tmp_path / "test.csv"
@@ -80,11 +83,12 @@ class TestMain:
             "argv",
             ["gh-pr-metrics", "--owner", "testowner", "--repo", "testrepo", "--update"],
         ):
-            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
-                result = gh_pr_metrics.main()
-                assert result == 0
+            with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
+                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                    result = gh_pr_metrics.main()
+                    assert result == 0
 
-    def test_main_update_mode_without_existing_state(self, tmp_path):
+    def test_main_update_mode_without_existing_state(self, tmp_path, default_config):
         """Test update mode fails when no state exists."""
         state_file = tmp_path / "state.yaml"
 
@@ -93,20 +97,22 @@ class TestMain:
             "argv",
             ["gh-pr-metrics", "--owner", "testowner", "--repo", "testrepo", "--update"],
         ):
-            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
-                result = gh_pr_metrics.main()
-                assert result == 1  # Should fail - no state
+            with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
+                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                    result = gh_pr_metrics.main()
+                    assert result == 1  # Should fail - no state
 
-    def test_main_update_all_no_tracked_repos(self, tmp_path):
+    def test_main_update_all_no_tracked_repos(self, tmp_path, default_config):
         """Test --update-all fails when no repos are tracked."""
         state_file = tmp_path / "state.yaml"
 
         with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all"]):
-            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
-                result = gh_pr_metrics.main()
-                assert result == 1
+            with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
+                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                    result = gh_pr_metrics.main()
+                    assert result == 1
 
-    def test_main_update_all_with_tracked_repos(self, requests_mock, tmp_path):
+    def test_main_update_all_with_tracked_repos(self, requests_mock, tmp_path, default_config):
         """Test --update-all processes all tracked repositories."""
         state_file = tmp_path / "state.yaml"
         csv_file1 = tmp_path / "repo1.csv"
@@ -143,11 +149,12 @@ class TestMain:
         )
 
         with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all"]):
-            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
-                result = gh_pr_metrics.main()
-                assert result == 0
+            with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
+                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                    result = gh_pr_metrics.main()
+                    assert result == 0
 
-    def test_main_update_all_with_partial_failure(self, requests_mock, tmp_path):
+    def test_main_update_all_with_partial_failure(self, requests_mock, tmp_path, default_config):
         """Test --update-all continues after individual repo failure."""
         state_file = tmp_path / "state.yaml"
         csv_file1 = tmp_path / "repo1.csv"
@@ -178,11 +185,12 @@ class TestMain:
         )
 
         with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all"]):
-            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
-                result = gh_pr_metrics.main()
-                assert result == 1  # Returns failure due to partial failure
+            with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
+                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                    result = gh_pr_metrics.main()
+                    assert result == 1  # Returns failure due to partial failure
 
-    def test_main_update_all_skips_repo_without_csv(self, tmp_path, requests_mock):
+    def test_main_update_all_skips_repo_without_csv(self, tmp_path, requests_mock, default_config):
         """Test --update-all skips repos without CSV file in state."""
         state_file = tmp_path / "state.yaml"
         csv_file = tmp_path / "repo.csv"
@@ -206,16 +214,17 @@ class TestMain:
         )
 
         with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all"]):
-            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
-                with mock.patch(
-                    "gh_pr_metrics.process_repository", return_value=(0, 1, 1)
-                ) as mock_process:
-                    result = gh_pr_metrics.main()
-                    # Should only process one repo
-                    assert mock_process.call_count == 1
-                    assert result == 0
+            with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
+                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                    with mock.patch(
+                        "gh_pr_metrics.process_repository", return_value=(0, 1, 1)
+                    ) as mock_process:
+                        result = gh_pr_metrics.main()
+                        # Should only process one repo
+                        assert mock_process.call_count == 1
+                        assert result == 0
 
-    def test_main_update_all_restarts_from_beginning_with_wait(self, requests_mock):
+    def test_main_update_all_restarts_from_beginning_with_wait(self, requests_mock, default_config):
         """Test that update-all with --wait restarts from beginning when repo fails."""
         state_file = Path(tempfile.mkdtemp()) / "state.yaml"
 
@@ -240,13 +249,14 @@ class TestMain:
             return (0, 1, 1) if call_count == 2 else (1, 0, 0)  # Fail first, succeed second
 
         with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all", "--wait"]):
-            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
-                with mock.patch("gh_pr_metrics.process_repository") as mock_process:
-                    with mock.patch.object(
-                        gh_pr_metrics.quota_manager, "wait_for_reset", return_value=True
-                    ):
-                        mock_process.side_effect = process_side_effect
-                        result = gh_pr_metrics.main()
+            with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
+                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                    with mock.patch("gh_pr_metrics.process_repository") as mock_process:
+                        with mock.patch.object(
+                            gh_pr_metrics.quota_manager, "wait_for_reset", return_value=True
+                        ):
+                            mock_process.side_effect = process_side_effect
+                            result = gh_pr_metrics.main()
 
                 # Should call process_repository twice (fail, wait, retry same repo)
                 assert mock_process.call_count == 2
@@ -257,7 +267,7 @@ class TestMain:
                 assert mock_process.call_args_list[1][0][1] == "repo1"
                 assert result == 0  # Success on retry
 
-    def test_update_all_reloads_state_on_restart(self, tmp_path, requests_mock):
+    def test_update_all_reloads_state_on_restart(self, tmp_path, requests_mock, default_config):
         """
         Test that update-all reloads state file on restart after quota reset.
 
@@ -338,16 +348,17 @@ class TestMain:
             return 0, 1, 1
 
         with mock.patch("gh_pr_metrics.process_repository", side_effect=mock_process_repository):
-            with mock.patch.object(
-                gh_pr_metrics.quota_manager, "wait_for_reset", return_value=True
-            ):
-                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
-                    with mock.patch.object(
-                        sys,
-                        "argv",
-                        ["gh-pr-metrics", "--update-all", "--wait"],
-                    ):
-                        result = gh_pr_metrics.main()
+            with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
+                with mock.patch.object(
+                    gh_pr_metrics.quota_manager, "wait_for_reset", return_value=True
+                ):
+                    with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                        with mock.patch.object(
+                            sys,
+                            "argv",
+                            ["gh-pr-metrics", "--update-all", "--wait"],
+                        ):
+                            result = gh_pr_metrics.main()
 
         # Should process: repo1, repo2, [restart], repo2, repo1
         assert call_count == 4
@@ -357,7 +368,9 @@ class TestMain:
 class TestProcessRepository:
     """Test process_repository function behavior."""
 
-    def test_returns_error_when_quota_exhausted_mid_processing(self, tmp_path, requests_mock):
+    def test_returns_error_when_quota_exhausted_mid_processing(
+        self, tmp_path, requests_mock, default_config
+    ):
         """Test that process_repository returns error code when quota exhausted."""
         state_file = tmp_path / "state.yaml"
         output_file = tmp_path / "output.csv"
@@ -422,7 +435,7 @@ class TestProcessRepository:
                                 end_date=end_date,
                                 token="fake",
                                 workers=1,
-                                ai_bot_regex="",
+                                config=default_config,
                                 merge_mode=False,
                             )
                         )
@@ -432,7 +445,7 @@ class TestProcessRepository:
         assert chunks_completed == 1  # Only completed first chunk
         assert total_chunks == 2  # Expected 2 chunks total
 
-    def test_no_csv_created_when_no_prs(self, tmp_path, requests_mock):
+    def test_no_csv_created_when_no_prs(self, tmp_path, requests_mock, default_config):
         """Test that process_repository does not create CSV when no PRs found."""
         state_file = tmp_path / "state.yaml"
         output_file = tmp_path / "output.csv"
@@ -463,7 +476,7 @@ class TestProcessRepository:
                 end_date=end_date,
                 token="fake",
                 workers=1,
-                ai_bot_regex="",
+                config=default_config,
                 merge_mode=False,
             )
 
@@ -479,7 +492,7 @@ class TestProcessRepository:
 class TestUpdateSinglePR:
     """Test update_single_pr function behavior."""
 
-    def test_update_single_pr_updates_existing_pr(self, requests_mock, tmp_path):
+    def test_update_single_pr_updates_existing_pr(self, requests_mock, tmp_path, default_config):
         """Test that update_single_pr updates an existing PR in CSV."""
         output_file = tmp_path / "output.csv"
 
@@ -550,7 +563,7 @@ class TestUpdateSinglePR:
             pr_number=123,
             output_file=str(output_file),
             token="fake",
-            ai_bot_regex="cursor\\[bot\\]|claude\\[bot\\]|Copilot",
+            config=default_config,
         )
 
         assert exit_code == 0
@@ -576,7 +589,7 @@ class TestUpdateSinglePR:
         assert pr_456 is not None
         assert pr_456["title"] == "Another PR"
 
-    def test_update_single_pr_adds_new_pr(self, requests_mock, tmp_path):
+    def test_update_single_pr_adds_new_pr(self, requests_mock, tmp_path, default_config):
         """Test that update_single_pr adds a new PR if not in CSV."""
         output_file = tmp_path / "output.csv"
 
@@ -645,7 +658,7 @@ class TestUpdateSinglePR:
             pr_number=789,
             output_file=str(output_file),
             token="fake",
-            ai_bot_regex="cursor\\[bot\\]|claude\\[bot\\]|Copilot",
+            config=default_config,
         )
 
         assert exit_code == 0
@@ -666,7 +679,7 @@ class TestUpdateSinglePR:
         assert pr_789["title"] == "New PR"
         assert pr_789["author"] == "newauthor"
 
-    def test_update_single_pr_fails_if_csv_missing(self):
+    def test_update_single_pr_fails_if_csv_missing(self, default_config):
         """Test that update_single_pr fails if CSV doesn't exist."""
         # Initialize github_client
         gh_pr_metrics.github_client = gh_pr_metrics.GitHubClient(
@@ -679,12 +692,12 @@ class TestUpdateSinglePR:
             pr_number=123,
             output_file="/nonexistent/path/output.csv",
             token="fake",
-            ai_bot_regex="cursor\\[bot\\]",
+            config=default_config,
         )
 
         assert exit_code == 1
 
-    def test_update_single_pr_fails_on_api_error(self, requests_mock, tmp_path):
+    def test_update_single_pr_fails_on_api_error(self, requests_mock, tmp_path, default_config):
         """Test that update_single_pr fails gracefully on API error."""
         output_file = tmp_path / "output.csv"
 
@@ -721,7 +734,7 @@ class TestUpdateSinglePR:
             pr_number=999,
             output_file=str(output_file),
             token="fake",
-            ai_bot_regex="cursor\\[bot\\]",
+            config=default_config,
         )
 
         assert exit_code == 1

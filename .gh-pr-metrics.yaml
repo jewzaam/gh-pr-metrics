@@ -9,6 +9,7 @@ ai_bots:
     - "cursor\\[bot\\]"
     - "claude\\[bot\\]"
     - "Copilot"
+    - "copilot-pull-request-reviewer\\[bot\\]"
   
   # Conditionally classified as AI - requires content pattern matching
   # Used for generic automation users that sometimes run AI reviews

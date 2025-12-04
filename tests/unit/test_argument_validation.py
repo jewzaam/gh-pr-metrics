@@ -3,12 +3,19 @@
 
 import sys
 from unittest import mock
+import pytest
 
 import gh_pr_metrics
 
 
 class TestArgumentValidation:
     """Test argument combination validation rules."""
+
+    @pytest.fixture(autouse=True)
+    def mock_load_config(self, default_config):
+        """Mock load_config for all tests in this class."""
+        with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
+            yield
 
     def test_wait_requires_update_all(self):
         """Test that --wait can only be used with --update-all."""
@@ -144,15 +151,19 @@ class TestArgumentValidation:
             result = gh_pr_metrics.main()
             assert result == 1
 
-    def test_pr_requires_output(self):
-        """Test that --pr requires --output."""
+    def test_pr_requires_output_or_config_pattern(self):
+        """Test that --pr requires --output or config output_pattern."""
+        # Config with no output_pattern
+        empty_config = gh_pr_metrics.Config({})
+
         with mock.patch.object(
             sys,
             "argv",
             ["gh-pr-metrics", "--owner", "test", "--repo", "test", "--pr", "123"],
         ):
-            result = gh_pr_metrics.main()
-            assert result == 1
+            with mock.patch("gh_pr_metrics.load_config", return_value=empty_config):
+                result = gh_pr_metrics.main()
+                assert result == 1
 
     def test_pr_cannot_use_init(self):
         """Test that --pr cannot be used with --init."""
@@ -212,3 +223,67 @@ class TestArgumentValidation:
         ):
             result = gh_pr_metrics.main()
             assert result == 1
+
+    def test_pr_works_with_config_output_pattern(self, requests_mock, tmp_path):
+        """Test that --pr works with config output_pattern (no --output needed)."""
+        # Create config with output_pattern
+        config_with_pattern = gh_pr_metrics.Config(
+            {
+                "output_pattern": "data/{owner}_{repo}.csv",
+                "ai_bots": {"always": ["cursor\\[bot\\]"]},
+            }
+        )
+
+        # Create the CSV file
+        csv_file = tmp_path / "data"
+        csv_file.mkdir()
+        output_file = csv_file / "test_test.csv"
+        output_file.write_text(
+            "pr_number,title,author,created_at,ready_for_review_at,merged_at,closed_at,"
+            "days_open,days_in_review,total_comment_count,non_ai_bot_comment_count,"
+            "ai_bot_comment_count,non_ai_bot_login_names,ai_bot_login_names,"
+            "changes_requested_count,unique_change_requesters,approval_count,status,url,errors,"
+            "lines_added,lines_deleted,files_changed,total_line_changes\n"
+        )
+
+        # Mock PR fetch
+        requests_mock.get(
+            "https://api.github.com/repos/test/test/pulls/123",
+            json={
+                "number": 123,
+                "title": "Test PR",
+                "user": {"login": "testuser"},
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "draft": False,
+                "state": "open",
+                "merged_at": None,
+                "closed_at": None,
+                "html_url": "https://github.com/test/test/pull/123",
+                "comments_url": "https://api.github.com/repos/test/test/issues/123/comments",
+                "review_comments_url": "https://api.github.com/repos/test/test/pulls/123/comments",
+            },
+        )
+
+        requests_mock.get("https://api.github.com/repos/test/test/issues/123/events", json=[])
+        requests_mock.get("https://api.github.com/repos/test/test/issues/123/comments", json=[])
+        requests_mock.get("https://api.github.com/repos/test/test/pulls/123/comments", json=[])
+        requests_mock.get("https://api.github.com/repos/test/test/pulls/123/reviews", json=[])
+
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+        )
+
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["gh-pr-metrics", "--owner", "test", "--repo", "test", "--pr", "123"],
+        ):
+            with mock.patch("gh_pr_metrics.load_config", return_value=config_with_pattern):
+                # Change to tmp_path for output
+                with mock.patch(
+                    "gh_pr_metrics.expand_output_pattern", return_value=str(output_file)
+                ):
+                    result = gh_pr_metrics.main()
+                    assert result == 0

@@ -45,6 +45,7 @@ dev = [
 
 [project.scripts]
 gh-pr-metrics = "gh_pr_metrics:main"
+gh-pr-extract-comments = "gh_pr_extract_comments:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

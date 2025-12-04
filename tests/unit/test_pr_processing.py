@@ -470,3 +470,98 @@ class TestDerivedTimeMetrics:
         assert result["days_open"] == ""
         assert result["days_in_review"] == ""
         assert "time_metrics" in result["errors"]
+
+
+class TestComplexityMetrics:
+    """Test PR complexity metrics extraction."""
+
+    def test_complexity_metrics_extracted(self, requests_mock):
+        """Test that complexity metrics are extracted from PR object."""
+        pr = {
+            "number": 1,
+            "title": "Test PR",
+            "user": {"login": "testuser"},
+            "draft": False,
+            "state": "open",
+            "created_at": "2024-01-01T00:00:00Z",
+            "merged_at": None,
+            "closed_at": None,
+            "html_url": "https://github.com/owner/repo/pull/1",
+            "comments_url": "https://api.github.com/repos/owner/repo/issues/1/comments",
+            "review_comments_url": "https://api.github.com/repos/owner/repo/pulls/1/comments",
+            "additions": 150,
+            "deletions": 50,
+            "changed_files": 10,
+        }
+
+        # Mock API calls
+        requests_mock.get("https://api.github.com/repos/owner/repo/issues/1/events", json=[])
+        requests_mock.get(pr["comments_url"], json=[])
+        requests_mock.get(pr["review_comments_url"], json=[])
+        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+
+        result = gh_pr_metrics.process_pr(pr, "owner", "repo", None)
+
+        assert result["lines_added"] == 150
+        assert result["lines_deleted"] == 50
+        assert result["files_changed"] == 10
+        assert result["total_line_changes"] == 200
+
+    def test_complexity_metrics_defaults_to_zero(self, requests_mock):
+        """Test that missing complexity metrics default to 0."""
+        pr = {
+            "number": 1,
+            "title": "Test PR",
+            "user": {"login": "testuser"},
+            "draft": False,
+            "state": "open",
+            "created_at": "2024-01-01T00:00:00Z",
+            "merged_at": None,
+            "closed_at": None,
+            "html_url": "https://github.com/owner/repo/pull/1",
+            "comments_url": "https://api.github.com/repos/owner/repo/issues/1/comments",
+            "review_comments_url": "https://api.github.com/repos/owner/repo/pulls/1/comments",
+            # No additions, deletions, or changed_files
+        }
+
+        # Mock API calls
+        requests_mock.get("https://api.github.com/repos/owner/repo/issues/1/events", json=[])
+        requests_mock.get(pr["comments_url"], json=[])
+        requests_mock.get(pr["review_comments_url"], json=[])
+        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+
+        result = gh_pr_metrics.process_pr(pr, "owner", "repo", None)
+
+        assert result["lines_added"] == 0
+        assert result["lines_deleted"] == 0
+        assert result["files_changed"] == 0
+        assert result["total_line_changes"] == 0
+
+    def test_total_line_changes_calculation(self, requests_mock):
+        """Test that total_line_changes is correctly calculated."""
+        pr = {
+            "number": 1,
+            "title": "Test PR",
+            "user": {"login": "testuser"},
+            "draft": False,
+            "state": "open",
+            "created_at": "2024-01-01T00:00:00Z",
+            "merged_at": None,
+            "closed_at": None,
+            "html_url": "https://github.com/owner/repo/pull/1",
+            "comments_url": "https://api.github.com/repos/owner/repo/issues/1/comments",
+            "review_comments_url": "https://api.github.com/repos/owner/repo/pulls/1/comments",
+            "additions": 500,
+            "deletions": 300,
+            "changed_files": 25,
+        }
+
+        # Mock API calls
+        requests_mock.get("https://api.github.com/repos/owner/repo/issues/1/events", json=[])
+        requests_mock.get(pr["comments_url"], json=[])
+        requests_mock.get(pr["review_comments_url"], json=[])
+        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+
+        result = gh_pr_metrics.process_pr(pr, "owner", "repo", None)
+
+        assert result["total_line_changes"] == 800  # 500 + 300

@@ -3,12 +3,19 @@
 
 from unittest import mock
 import sys
+import pytest
 
 import gh_pr_metrics
 
 
 class TestInitMode:
     """Test repository initialization functionality."""
+
+    @pytest.fixture(autouse=True)
+    def mock_load_config(self, default_config):
+        """Mock load_config for all tests in this class."""
+        with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
+            yield
 
     def test_init_requires_owner(self):
         """Test that --init requires --owner."""

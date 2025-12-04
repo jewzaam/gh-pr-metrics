@@ -48,6 +48,133 @@ API_SAFETY_BUFFER = 10  # Reserve for safety (unauthenticated limit is 60/hour t
 API_QUOTA_RESERVE_PCT = 0.05  # Reserve 5% of total quota, don't exhaust completely
 
 
+# ============================================================================
+# Configuration Management
+# ============================================================================
+
+
+class ConditionalBotConfig:
+    """Configuration for conditional AI bot detection."""
+
+    def __init__(self, name: str, content_patterns: List[str], match_any: bool = True):
+        self.name = name
+        self.content_patterns = content_patterns
+        self.match_any = match_any
+
+    def matches_content(self, comment_body: str) -> bool:
+        """Check if comment body matches AI patterns using regex."""
+        import re
+
+        if not comment_body:
+            return False
+
+        if self.match_any:
+            # Any pattern match = AI
+            return any(re.search(pattern, comment_body) for pattern in self.content_patterns)
+        else:
+            # All patterns required = AI
+            return all(re.search(pattern, comment_body) for pattern in self.content_patterns)
+
+
+class Config:
+    """Application configuration loaded from YAML file."""
+
+    def __init__(self, config_dict: Dict[str, Any]):
+        """Initialize config from parsed YAML dict."""
+        # AI bot detection
+        ai_bots = config_dict.get("ai_bots", {})
+        self.always_ai_bots: List[str] = ai_bots.get("always", [])
+        self.conditional_bots: List[ConditionalBotConfig] = []
+
+        for bot_config in ai_bots.get("conditional", []):
+            self.conditional_bots.append(
+                ConditionalBotConfig(
+                    name=bot_config["name"],
+                    content_patterns=bot_config.get("content_patterns", []),
+                    match_any=bot_config.get("match_any", True),
+                )
+            )
+
+        # Processing settings
+        self.workers: int = config_dict.get("workers", DEFAULT_WORKERS)
+        self.output_pattern: Optional[str] = config_dict.get("output_pattern")
+        self.log_file: str = config_dict.get("log_file", "gh-pr-metrics.log")
+        self.default_days_back: int = config_dict.get("default_days_back", DEFAULT_DAYS_BACK)
+
+        # Quota settings
+        quota = config_dict.get("quota", {})
+        self.quota_reserve: int = quota.get("reserve", 100)
+        self.quota_min_buffer: int = quota.get("min_buffer", 50)
+
+    def is_ai_bot(self, login: str, comment_body: str = "") -> bool:
+        """
+        Determine if a login/comment is from an AI bot.
+
+        Args:
+            login: The GitHub login name
+            comment_body: The comment text (optional, for conditional detection)
+
+        Returns:
+            True if identified as AI bot, False otherwise
+        """
+        # Check always-AI bots with regex
+        import re
+
+        for pattern in self.always_ai_bots:
+            if re.match(pattern, login):
+                return True
+
+        # Check conditional bots with regex
+        for bot_config in self.conditional_bots:
+            if re.match(bot_config.name, login):
+                return bot_config.matches_content(comment_body)
+
+        return False
+
+
+def load_config(config_path: str) -> Config:
+    """
+    Load and validate configuration from YAML file.
+
+    Args:
+        config_path: Path to configuration file
+
+    Returns:
+        Validated Config object (uses defaults if file missing or empty)
+
+    Raises:
+        ValueError: If config YAML is invalid or output_pattern lacks placeholders
+    """
+    config_file = Path(config_path)
+
+    # Missing config file = use defaults
+    if not config_file.exists():
+        return Config({})
+
+    try:
+        with open(config_file, "r", encoding="utf-8") as f:
+            config_dict = yaml.safe_load(f)
+
+        # Empty config file = use defaults
+        if config_dict is None:
+            return Config({})
+
+        # Validate output_pattern has placeholders if set
+        output_pattern = config_dict.get("output_pattern")
+        if output_pattern and "{owner}" not in output_pattern and "{repo}" not in output_pattern:
+            raise ValueError(
+                f"Invalid output_pattern '{output_pattern}': "
+                "must contain {{owner}} and/or {{repo}} placeholders"
+            )
+
+        return Config(config_dict)
+
+    except yaml.YAMLError as e:
+        raise ValueError(f"Invalid YAML in configuration file: {e}")
+    except KeyError as e:
+        raise ValueError(f"Missing required configuration key: {e}")
+
+
 class GitHubAPIError(Exception):
     """Exception raised for GitHub API errors."""
 
@@ -876,17 +1003,23 @@ def get_ready_for_review_time(
 
 
 def count_comments(
-    pr: Dict[str, Any], owner: str, repo: str, token: Optional[str], ai_bot_pattern: str = None
+    pr: Dict[str, Any],
+    owner: str,
+    repo: str,
+    token: Optional[str],
+    config: Config,
+    reviews: List[Dict[str, Any]] = None,
 ) -> tuple[int, int, int, str, str]:
     """
     Count total comments, non-AI bot comments, and AI bot comments.
     Returns (total_comments, non_ai_bot_comments, ai_bot_comments,
              non_ai_bot_login_names, ai_bot_login_names).
     Non-AI bot and AI bot login names are comma-separated strings.
-    ai_bot_pattern: regex pattern to identify AI bots
-    """
-    import re
+    Uses config for AI bot detection (both always and conditional patterns).
 
+    Args:
+        reviews: Optional pre-fetched reviews list to avoid duplicate API calls
+    """
     total_comments = 0
     non_ai_bot_comments = 0
     ai_bot_comments = 0
@@ -901,7 +1034,18 @@ def count_comments(
             total_comments += 1
             if comment.get("user", {}).get("type") == "Bot":
                 login = comment["user"]["login"]
-                if ai_bot_pattern and re.match(ai_bot_pattern, login):
+                comment_body = comment.get("body", "")
+
+                is_ai = config.is_ai_bot(login, comment_body)
+                logger.debug(
+                    "PR #%d issue comment: bot=%s, is_ai=%s, body_preview=%s",
+                    pr["number"],
+                    login,
+                    is_ai,
+                    comment_body[:100] if comment_body else "(empty)",
+                )
+
+                if is_ai:
                     ai_bot_logins.add(login)
                     ai_bot_comments += 1
                 else:
@@ -918,7 +1062,18 @@ def count_comments(
             total_comments += 1
             if comment.get("user", {}).get("type") == "Bot":
                 login = comment["user"]["login"]
-                if ai_bot_pattern and re.match(ai_bot_pattern, login):
+                comment_body = comment.get("body", "")
+
+                is_ai = config.is_ai_bot(login, comment_body)
+                logger.debug(
+                    "PR #%d review comment: bot=%s, is_ai=%s, body_preview=%s",
+                    pr["number"],
+                    login,
+                    is_ai,
+                    comment_body[:100] if comment_body else "(empty)",
+                )
+
+                if is_ai:
                     ai_bot_logins.add(login)
                     ai_bot_comments += 1
                 else:
@@ -926,6 +1081,38 @@ def count_comments(
                     non_ai_bot_comments += 1
     except GitHubAPIError as e:
         logger.debug("Failed to fetch review comments for PR #%d: %s", pr["number"], e)
+
+    # Review bodies (summary text in reviews)
+    # Use pre-fetched reviews if provided, otherwise fetch
+    if reviews is None:
+        try:
+            reviews = github_client.fetch_reviews(owner, repo, pr["number"])
+        except GitHubAPIError as e:
+            logger.debug("Failed to fetch reviews for PR #%d: %s", pr["number"], e)
+            reviews = []
+
+    for review in reviews:
+        # Only count reviews with body text as comments
+        review_body = review.get("body", "")
+        if review_body and review.get("user", {}).get("type") == "Bot":
+            total_comments += 1
+            login = review["user"]["login"]
+
+            is_ai = config.is_ai_bot(login, review_body)
+            logger.debug(
+                "PR #%d review body: bot=%s, is_ai=%s, body_preview=%s",
+                pr["number"],
+                login,
+                is_ai,
+                review_body[:100] if review_body else "(empty)",
+            )
+
+            if is_ai:
+                ai_bot_logins.add(login)
+                ai_bot_comments += 1
+            else:
+                non_ai_bot_logins.add(login)
+                non_ai_bot_comments += 1
 
     # Convert to comma-separated strings, sorted for consistency
     non_ai_bot_login_names = ",".join(sorted(non_ai_bot_logins))
@@ -941,17 +1128,26 @@ def count_comments(
 
 
 def get_review_metrics(
-    pr: Dict[str, Any], owner: str, repo: str, token: Optional[str]
+    pr: Dict[str, Any],
+    owner: str,
+    repo: str,
+    token: Optional[str],
+    reviews: List[Dict[str, Any]] = None,
 ) -> tuple[int, int, int]:
     """
     Get review metrics: changes requested count, unique change requesters, approvals.
     Returns (changes_requested_count, unique_change_requesters, approval_count).
+
+    Args:
+        reviews: Optional pre-fetched reviews list to avoid duplicate API calls
     """
-    try:
-        reviews = github_client.fetch_reviews(owner, repo, pr["number"])
-    except GitHubAPIError as e:
-        logger.debug("Failed to fetch reviews for PR #%d: %s", pr["number"], e)
-        return 0, 0, 0
+    # Use pre-fetched reviews if provided, otherwise fetch
+    if reviews is None:
+        try:
+            reviews = github_client.fetch_reviews(owner, repo, pr["number"])
+        except GitHubAPIError as e:
+            logger.debug("Failed to fetch reviews for PR #%d: %s", pr["number"], e)
+            return 0, 0, 0
 
     # Count total change requests
     changes_requested_count = sum(1 for r in reviews if r.get("state") == "CHANGES_REQUESTED")
@@ -990,7 +1186,7 @@ def determine_pr_status(pr: Dict[str, Any]) -> str:
 
 
 def process_pr(
-    pr: Dict[str, Any], owner: str, repo: str, token: Optional[str], ai_bot_pattern: str = None
+    pr: Dict[str, Any], owner: str, repo: str, token: Optional[str], config: Config
 ) -> Dict[str, Any]:
     """Process a single PR and extract all metrics."""
     pr_number = pr["number"]
@@ -1013,10 +1209,18 @@ def process_pr(
         metrics["ready_for_review_at"] = pr["created_at"]
         errors.append(f"ready_time: {e}")
 
-    # Comment counts
+    # Fetch reviews once for both comment counting and review metrics
+    try:
+        reviews = github_client.fetch_reviews(owner, repo, pr_number)
+    except GitHubAPIError as e:
+        logger.debug("Failed to fetch reviews for PR #%d: %s", pr_number, e)
+        reviews = []
+        errors.append(f"reviews_fetch: {e}")
+
+    # Comment counts (including review bodies)
     try:
         total_comments, non_ai_bot_comments, ai_bot_comments, non_ai_bot_names, ai_bot_names = (
-            count_comments(pr, owner, repo, token, ai_bot_pattern)
+            count_comments(pr, owner, repo, token, config, reviews)
         )
         metrics["total_comment_count"] = total_comments
         metrics["non_ai_bot_comment_count"] = non_ai_bot_comments
@@ -1034,7 +1238,9 @@ def process_pr(
 
     # Review metrics
     try:
-        changes_requested, unique_requesters, approvals = get_review_metrics(pr, owner, repo, token)
+        changes_requested, unique_requesters, approvals = get_review_metrics(
+            pr, owner, repo, token, reviews
+        )
         metrics["changes_requested_count"] = changes_requested
         metrics["unique_change_requesters"] = unique_requesters
         metrics["approval_count"] = approvals
@@ -1173,18 +1379,13 @@ Environment Variables:
     parser.add_argument(
         "--workers",
         type=int,
-        default=DEFAULT_WORKERS,
-        help=f"Number of parallel workers for processing PRs (default: {DEFAULT_WORKERS})",
+        default=None,
+        help="Number of parallel workers for processing PRs (default: from config file)",
     )
     parser.add_argument(
-        "--ai-bot-regex",
-        default="cursor\\[bot\\]|claude\\[bot\\]|Copilot",
-        help="Regex pattern to identify AI bots (default: cursor[bot]|claude[bot]|Copilot)",
-    )
-    parser.add_argument(
-        "--log-file",
-        default="gh-pr-metrics.log",
-        help="Log file path (default: gh-pr-metrics.log in current directory)",
+        "--config",
+        default=".gh-pr-metrics.yaml",
+        help="Configuration file path (default: .gh-pr-metrics.yaml)",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
@@ -1237,7 +1438,7 @@ def update_single_pr(
     pr_number: int,
     output_file: str,
     token: Optional[str],
-    ai_bot_regex: str,
+    config: Config,
 ) -> int:
     """
     Update a single PR in an existing CSV file.
@@ -1254,7 +1455,7 @@ def update_single_pr(
 
     logger.info("Processing PR #%d", pr_number)
     try:
-        pr_metrics = process_pr(pr, owner, repo, token, ai_bot_regex)
+        pr_metrics = process_pr(pr, owner, repo, token, config)
     except Exception as e:
         logger.error("Failed to process PR #%d: %s", pr_number, e)
         return 1
@@ -1294,7 +1495,7 @@ def process_repository(
     end_date: datetime,
     token: Optional[str],
     workers: int,
-    ai_bot_regex: str,
+    config: Config,
     merge_mode: bool = False,
 ) -> tuple[int, int, int]:
     """
@@ -1417,7 +1618,7 @@ def process_repository(
 
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 future_to_pr = {
-                    executor.submit(process_pr, pr, owner, repo, token, ai_bot_regex): pr
+                    executor.submit(process_pr, pr, owner, repo, token, config): pr
                     for pr in prs_chunk
                 }
 
@@ -1498,10 +1699,20 @@ def process_repository(
 def main() -> int:
     """Main entry point."""
     args = parse_arguments()
-    setup_logging(args.debug, args.log_file)
+
+    # Load configuration (uses defaults if file missing)
+    try:
+        config = load_config(args.config)
+    except ValueError as e:
+        print(f"Error loading configuration: {e}", file=sys.stderr)
+        print(f"Configuration file: {args.config}", file=sys.stderr)
+        return 1
+
+    setup_logging(args.debug, config.log_file)
 
     logger.info("GitHub PR Metrics Tool v%s", __version__)
-    logger.info("Logging to: %s", args.log_file)
+    logger.info("Configuration file: %s", args.config)
+    logger.info("Logging to: %s", config.log_file)
     logger.debug("Arguments: %s", args)
 
     # Validate argument combinations
@@ -1557,8 +1768,8 @@ def main() -> int:
         logger.error("--pr cannot be used with --init, --update, or --update-all")
         return 1
 
-    if args.pr and not args.output:
-        logger.error("--pr requires --output to specify the CSV file to update")
+    if args.pr and not args.output and not config.output_pattern:
+        logger.error("--pr requires --output or config output_pattern to specify the CSV file")
         return 1
 
     # Get GitHub token and initialize client
@@ -1566,17 +1777,18 @@ def main() -> int:
     global github_client
     github_client = GitHubClient(token, quota_manager, logger)
 
+    # Determine workers: CLI override takes precedence, otherwise use config default
+    workers = args.workers if args.workers else config.workers
+
     if not token:
         logger.warning(
             "No GITHUB_TOKEN found. API rate limits will be restrictive "
             "for unauthenticated requests."
         )
         # Force single worker to avoid hitting rate limits too quickly
-        workers = 1 if args.workers > 1 else args.workers
-        if args.workers > 1:
+        if workers > 1:
             logger.warning("Forcing --workers=1 due to missing GITHUB_TOKEN")
-    else:
-        workers = args.workers
+            workers = 1
 
     # Check and display rate limit status
     rate_info = quota_manager.initialize(token)
@@ -1794,7 +2006,7 @@ def main() -> int:
                     end_date,
                     token,
                     workers,
-                    args.ai_bot_regex,
+                    config,
                     merge_mode=True,
                 )
 
@@ -1887,15 +2099,16 @@ def main() -> int:
             end_date,
             token,
             workers,
-            args.ai_bot_regex,
+            config,
             merge_mode=True,
         )
         return exit_code
 
     # Handle single PR update mode
     if args.pr:
-        output_file = expand_output_pattern(args.output, owner, repo)
-        exit_code = update_single_pr(owner, repo, args.pr, output_file, token, args.ai_bot_regex)
+        output_pattern = args.output or config.output_pattern
+        output_file = expand_output_pattern(output_pattern, owner, repo)
+        exit_code = update_single_pr(owner, repo, args.pr, output_file, token, config)
         return exit_code
 
     # Regular mode (non-update)
@@ -1924,7 +2137,7 @@ def main() -> int:
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
         exit_code, _, _ = process_repository(
-            owner, repo, output_file, start_date, end_date, token, workers, args.ai_bot_regex
+            owner, repo, output_file, start_date, end_date, token, workers, config
         )
         return exit_code
     else:
@@ -1944,7 +2157,7 @@ def main() -> int:
 
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 future_to_pr = {
-                    executor.submit(process_pr, pr, owner, repo, token, args.ai_bot_regex): pr
+                    executor.submit(process_pr, pr, owner, repo, token, config): pr
                     for pr in all_prs
                 }
 

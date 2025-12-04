@@ -709,6 +709,10 @@ class CSVManager:
             "status",
             "url",
             "errors",
+            "lines_added",
+            "lines_deleted",
+            "files_changed",
+            "total_line_changes",
         ]
 
     def read_csv(self, csv_file: str) -> Dict[int, Dict[str, Any]]:
@@ -1074,6 +1078,12 @@ def process_pr(
         metrics["days_open"] = ""
         metrics["days_in_review"] = ""
         errors.append(f"time_metrics: {e}")
+
+    # Complexity metrics
+    metrics["lines_added"] = pr.get("additions", 0)
+    metrics["lines_deleted"] = pr.get("deletions", 0)
+    metrics["files_changed"] = pr.get("changed_files", 0)
+    metrics["total_line_changes"] = metrics["lines_added"] + metrics["lines_deleted"]
 
     # Errors
     metrics["errors"] = "; ".join(errors) if errors else ""

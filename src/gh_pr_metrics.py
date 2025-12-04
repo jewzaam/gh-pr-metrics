@@ -15,7 +15,6 @@ import os
 import subprocess
 import sys
 import tempfile
-import threading
 import yaml
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -29,23 +28,25 @@ try:
 except ImportError:
     ARGCOMPLETE_AVAILABLE = False
 
-import requests
 from dateutil import parser as date_parser
+
+from github_api import (
+    GitHubAPIError,
+    GitHubClient,
+    QuotaManager,
+    API_CALLS_PER_PR,
+)
 
 
 # Version
 __version__ = "0.1.0"
 
 # Constants
-GITHUB_API_BASE = "https://api.github.com"
 DEFAULT_DAYS_BACK = 365
 DEFAULT_WORKERS = 4
 STATE_FILE = Path.home() / ".gh-pr-metrics-state.yaml"
 PR_NUMBER_FIELD = "pr_number"
 MAX_CHUNK_DAYS = 30  # Maximum days to process in a single chunk
-API_CALLS_PER_PR = 4  # Estimate: timeline events, reviews, comments, review comments
-API_SAFETY_BUFFER = 10  # Reserve for safety (unauthenticated limit is 60/hour total)
-API_QUOTA_RESERVE_PCT = 0.05  # Reserve 5% of total quota, don't exhaust completely
 
 
 # ============================================================================
@@ -173,200 +174,6 @@ def load_config(config_path: str) -> Config:
         raise ValueError(f"Invalid YAML in configuration file: {e}")
     except KeyError as e:
         raise ValueError(f"Missing required configuration key: {e}")
-
-
-class GitHubAPIError(Exception):
-    """Exception raised for GitHub API errors."""
-
-    pass
-
-
-class QuotaManager:
-    """
-    Manages GitHub API quota tracking and enforcement.
-
-    Tracks quota from response headers, provides quota checking,
-    and supports waiting for quota reset.
-    """
-
-    def __init__(self):
-        """Initialize quota manager with zero quota."""
-        self._remaining = 0
-        self._limit = 0
-        self._reset = 0  # Unix timestamp when quota resets
-        self._lock = threading.Lock()
-
-    def get_quota_prefix(self) -> str:
-        """Get quota prefix for logging (thread-safe)."""
-        with self._lock:
-            if self._limit == 0:
-                return "[API ----/----]"
-
-            # Left-pad remaining to match length of limit
-            limit_str = str(self._limit)
-            remaining_str = str(self._remaining).rjust(len(limit_str))
-            return f"[API {remaining_str}/{limit_str}]"
-
-    def update_from_headers(self, headers: dict) -> None:
-        """Update quota tracking from API response headers (thread-safe)."""
-        remaining = headers.get("X-RateLimit-Remaining")
-        limit = headers.get("X-RateLimit-Limit")
-        reset = headers.get("X-RateLimit-Reset")
-
-        with self._lock:
-            if remaining is not None:
-                self._remaining = int(remaining)
-            if limit is not None:
-                self._limit = int(limit)
-            if reset is not None:
-                self._reset = int(reset)
-
-    def get_current_quota(self) -> tuple[int, int, int]:
-        """Get current quota (thread-safe). Returns (remaining, limit, reset)."""
-        with self._lock:
-            return self._remaining, self._limit, self._reset
-
-    def initialize(self, token: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Initialize quota by calling /rate_limit API.
-        Returns dict with 'remaining', 'limit', 'reset' keys.
-        """
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-
-        try:
-            response = requests.get(f"{GITHUB_API_BASE}/rate_limit", headers=headers, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-
-            core = data.get("resources", {}).get("core", {})
-            remaining = core.get("remaining", 0)
-            limit = core.get("limit", 0)
-            reset = core.get("reset", 0)
-
-            # Update tracking (thread-safe)
-            with self._lock:
-                self._remaining = remaining
-                self._limit = limit
-                self._reset = reset
-
-            return {
-                "remaining": remaining,
-                "limit": limit,
-                "reset": reset,
-            }
-        except Exception as e:
-            logging.debug("Could not check rate limit: %s", e)
-            return {}
-
-    def calculate_max_prs(self) -> int:
-        """
-        Calculate maximum number of PRs processable with current quota.
-        Reserves % of total quota to avoid complete exhaustion.
-        """
-        remaining, limit, _ = self.get_current_quota()
-
-        if limit == 0:
-            return 100  # Not initialized yet, conservative default
-
-        # Reserve 5% of total quota (don't exhaust completely)
-        reserve = int(limit * API_QUOTA_RESERVE_PCT)
-        effective_buffer = max(API_SAFETY_BUFFER, reserve)
-
-        available_for_prs = max(0, remaining - effective_buffer)
-        max_prs = available_for_prs // API_CALLS_PER_PR
-
-        return max_prs
-
-    def wait_for_reset(self) -> bool:
-        """
-        Wait until API quota resets.
-        Returns True if successfully waited.
-        """
-        import time
-
-        remaining, limit, reset_timestamp = self.get_current_quota()
-
-        # Add buffer for safety
-        reset_timestamp = reset_timestamp + 15
-
-        if reset_timestamp == 0:
-            logger.error("Cannot determine quota reset time (not initialized)")
-            return False
-
-        reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
-        now = datetime.now(timezone.utc)
-        wait_seconds = (reset_time - now).total_seconds()
-
-        if wait_seconds <= 0:
-            logger.info("Quota already reset, refreshing...")
-            return True
-
-        wait_minutes = wait_seconds / 60
-        logger.info(f"Waiting {wait_minutes:.1f} minutes for quota reset...")
-        logger.info(f"Will resume at {reset_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-
-        time.sleep(wait_seconds)
-
-        logger.info("Quota reset complete, refreshing quota like startup...")
-        return True
-
-    def check_sufficient(
-        self, estimated_calls: int, repo_ctx: str, chunk_info: str = ""
-    ) -> tuple[bool, int]:
-        """
-        Check if sufficient API rate limit available for estimated calls.
-        Does NOT make an API call - uses current quota.
-
-        Returns (sufficient, max_prs_possible).
-        repo_ctx: Context string like "[owner/repo]" for logging
-        chunk_info: Optional string like "Chunk 1: " for context
-        """
-        # Use current quota (no API call unless not initialized)
-        remaining, limit, _ = self.get_current_quota()
-
-        if limit == 0:
-            # Quota not initialized yet - initialize it now (one-time API call)
-            logger.warning("[%s] Quota not initialized, fetching current status", repo_ctx)
-            rate_info = self.initialize(get_github_token())
-            if not rate_info:
-                # Failed to get quota - cannot proceed safely
-                logger.error("[%s] Failed to fetch quota, cannot verify rate limit", repo_ctx)
-                return False, 0
-            remaining = rate_info["remaining"]
-            limit = rate_info["limit"]
-
-        # Calculate max PRs we can handle
-        max_prs = self.calculate_max_prs()
-
-        # Calculate effective buffer (5% of total or fixed buffer, whichever is larger)
-        reserve = int(limit * API_QUOTA_RESERVE_PCT)
-        effective_buffer = max(API_SAFETY_BUFFER, reserve)
-
-        # Show estimated calls for this operation
-        logger.info("[%s] %sEstimated API calls: ~%d", repo_ctx, chunk_info, estimated_calls)
-
-        if remaining <= (estimated_calls + effective_buffer):
-            logger.error(
-                "[%s] %sInsufficient API rate limit: need ~%d calls + %d buffer "
-                "(reserve=%d), only %d available",
-                repo_ctx,
-                chunk_info,
-                estimated_calls,
-                effective_buffer,
-                reserve,
-                remaining,
-            )
-            logger.warning(
-                "[%s] %sCurrent quota allows processing ~%d PRs max", repo_ctx, chunk_info, max_prs
-            )
-            return False, max_prs
-
-        return True, max_prs
 
 
 class StateManager:
@@ -509,296 +316,6 @@ class StateManager:
                 continue
 
         return repos
-
-
-class GitHubClient:
-    """
-    GitHub API client for making authenticated requests.
-
-    Handles all communication with GitHub API and automatically
-    updates quota tracking from response headers.
-    """
-
-    def __init__(self, token: Optional[str] = None, quota_manager=None, logger=None):
-        """Initialize GitHub client with optional token, quota manager, and logger."""
-        self._token = token
-        self._quota_manager = quota_manager
-        self._logger = logger
-
-    def make_request(self, url: str, params: Optional[Dict[str, Any]] = None) -> Any:
-        """Make a GitHub API request with error handling."""
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-        if self._token:
-            headers["Authorization"] = f"Bearer {self._token}"
-
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=30)
-            response.raise_for_status()
-
-            # Update quota tracking from response headers
-            if self._quota_manager:
-                self._quota_manager.update_from_headers(response.headers)
-
-            return response.json()
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 403:
-                # Check if it's actually a rate limit error
-                rate_limit = e.response.headers.get("X-RateLimit-Remaining")
-                if rate_limit == "0":
-                    reset_time = e.response.headers.get("X-RateLimit-Reset", "unknown")
-                    auth_status = "authenticated" if self._token else "unauthenticated"
-                    raise GitHubAPIError(
-                        f"GitHub API rate limit exceeded ({auth_status}). "
-                        f"Rate limit resets at {reset_time}. "
-                        f"Limit: {e.response.headers.get('X-RateLimit-Limit', 'unknown')}"
-                    )
-                else:
-                    # 403 but not rate limit - likely permissions
-                    raise GitHubAPIError(
-                        "GitHub API forbidden: insufficient permissions or invalid token."
-                    )
-            elif e.response.status_code == 401:
-                raise GitHubAPIError("GitHub API unauthorized: invalid or expired token.")
-            elif e.response.status_code == 404:
-                raise GitHubAPIError("Repository not found or insufficient permissions.")
-            else:
-                raise GitHubAPIError(f"GitHub API error: {e}")
-        except requests.exceptions.RequestException as e:
-            raise GitHubAPIError(f"Network error: {e}")
-
-    def _parse_link_header(self, link_header: str) -> Optional[str]:
-        """Parse Link header to extract next page URL."""
-        if not link_header:
-            return None
-
-        # Link header format: <url>; rel="next", <url>; rel="last"
-        for link in link_header.split(","):
-            if 'rel="next"' in link:
-                # Extract URL between < and >
-                start = link.find("<")
-                end = link.find(">")
-                if start != -1 and end != -1:
-                    return link[start + 1 : end]
-        return None
-
-    def _make_paginated_request(
-        self, url: str, params: Optional[Dict[str, Any]] = None
-    ) -> List[Dict[str, Any]]:
-        """Make paginated API requests, following Link headers."""
-        all_items = []
-        current_url = url
-        current_params = params or {}
-        current_params["per_page"] = 100  # Request maximum per page
-
-        while current_url:
-            headers = {
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            }
-            if self._token:
-                headers["Authorization"] = f"Bearer {self._token}"
-
-            try:
-                response = requests.get(
-                    current_url, headers=headers, params=current_params, timeout=30
-                )
-                response.raise_for_status()
-
-                # Update quota tracking
-                if self._quota_manager:
-                    self._quota_manager.update_from_headers(response.headers)
-
-                data = response.json()
-
-                # Handle both list and single item responses
-                if isinstance(data, list):
-                    all_items.extend(data)
-                else:
-                    all_items.append(data)
-                    break  # Single item, no pagination
-
-                # Check for next page
-                link_header = response.headers.get("Link", "")
-                next_url = self._parse_link_header(link_header)
-
-                if next_url:
-                    current_url = next_url
-                    current_params = None  # Next URL already includes params
-                else:
-                    break  # No more pages
-
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 403:
-                    rate_limit = e.response.headers.get("X-RateLimit-Remaining")
-                    if rate_limit == "0":
-                        reset_time = e.response.headers.get("X-RateLimit-Reset", "unknown")
-                        auth_status = "authenticated" if self._token else "unauthenticated"
-                        raise GitHubAPIError(
-                            f"GitHub API rate limit exceeded ({auth_status}). "
-                            f"Rate limit resets at {reset_time}. "
-                            f"Limit: {e.response.headers.get('X-RateLimit-Limit', 'unknown')}"
-                        )
-                    else:
-                        raise GitHubAPIError(
-                            "GitHub API forbidden: insufficient permissions or invalid token."
-                        )
-                elif e.response.status_code == 401:
-                    raise GitHubAPIError("GitHub API unauthorized: invalid or expired token.")
-                elif e.response.status_code == 404:
-                    raise GitHubAPIError("Repository not found or insufficient permissions.")
-                else:
-                    raise GitHubAPIError(f"GitHub API error: {e}")
-            except requests.exceptions.RequestException as e:
-                raise GitHubAPIError(f"Network error: {e}")
-
-        return all_items
-
-    def fetch_all_prs(
-        self,
-        owner: str,
-        repo: str,
-        start_date: datetime,
-        end_date: datetime,
-    ) -> List[Dict[str, Any]]:
-        """
-        Fetch all pull requests in date range, sorted by updated_at ascending.
-
-        Internally fetches descending (newest first) and stops at start_date
-        to avoid wasting API calls on old PRs. Returns PRs in ascending order.
-        """
-        url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls"
-        all_prs = []
-        page = 1
-        per_page = 100
-
-        while True:
-            params = {
-                "state": "all",
-                "sort": "updated",
-                "direction": "desc",  # Newest first
-                "page": page,
-                "per_page": per_page,
-            }
-
-            prs = self.make_request(url, params)
-
-            if not prs:
-                break
-
-            # Track if we got a full page (to know if more exist)
-            got_full_page = len(prs) == per_page
-
-            for pr in prs:
-                updated_at = date_parser.parse(pr["updated_at"])
-
-                # Stop if we've gone past the start date
-                if updated_at < start_date:
-                    # Found the first PR before start_date, stop fetching more
-                    # by forcing got_full_page to false
-                    got_full_page = False
-                    break
-
-                # Skip PRs after end date
-                if updated_at > end_date:
-                    continue
-
-                # Include PRs within date range
-                all_prs.append(pr)
-
-            # If we didn't get a full page, we're done
-            if not got_full_page:
-                break
-
-            page += 1
-
-        # Reverse entire collection to return oldest-first
-        all_prs.reverse()
-        return all_prs
-
-    def list_repos(self, owner: str) -> List[str]:
-        """
-        List all repositories for an owner (user or organization).
-        Returns list of repository names.
-        """
-        repos = []
-        page = 1
-        per_page = 100
-
-        # Try as organization first
-        url_base = f"{GITHUB_API_BASE}/orgs/{owner}/repos"
-        is_org = True
-
-        while True:
-            params = {"page": page, "per_page": per_page, "type": "all"}
-
-            try:
-                response = self.make_request(url_base, params)
-            except GitHubAPIError as e:
-                # If org request fails with 404, try as user
-                if "not found" in str(e).lower() and is_org:
-                    if self._logger:
-                        self._logger.debug("Not an organization, trying as user: %s", owner)
-                    url_base = f"{GITHUB_API_BASE}/users/{owner}/repos"
-                    is_org = False
-                    page = 1  # Reset page counter
-                    continue
-                else:
-                    raise
-
-            if not response:
-                break
-
-            for repo in response:
-                repos.append(repo["name"])
-
-            # Break if we got fewer results than requested
-            if len(response) < per_page:
-                break
-
-            page += 1
-
-        return repos
-
-    def validate_repo_access(self, owner: str, repo: str) -> bool:
-        """
-        Validate that we have access to a repository.
-        Returns True if accessible, False otherwise.
-        """
-        url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}"
-
-        try:
-            self.make_request(url)
-            return True
-        except GitHubAPIError as e:
-            if self._logger:
-                self._logger.debug("Cannot access %s/%s: %s", owner, repo, e)
-            return False
-
-    def fetch_timeline_events(self, owner: str, repo: str, pr_number: int) -> List[Dict[str, Any]]:
-        """Fetch all timeline events for a PR with pagination."""
-        url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{pr_number}/events"
-        return self._make_paginated_request(url)
-
-    def fetch_issue_comments(self, comments_url: str) -> List[Dict[str, Any]]:
-        """Fetch all issue comments with pagination."""
-        return self._make_paginated_request(comments_url)
-
-    def fetch_review_comments(self, review_comments_url: str) -> List[Dict[str, Any]]:
-        """Fetch all review comments with pagination."""
-        return self._make_paginated_request(review_comments_url)
-
-    def fetch_reviews(self, owner: str, repo: str, pr_number: int) -> List[Dict[str, Any]]:
-        """Fetch all reviews for a PR with pagination."""
-        url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
-        return self._make_paginated_request(url)
-
-    def fetch_single_pr(self, owner: str, repo: str, pr_number: int) -> Dict[str, Any]:
-        """Fetch a single pull request by number."""
-        url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}"
-        return self.make_request(url)
 
 
 class CSVManager:
@@ -1574,7 +1091,7 @@ def process_repository(
             # Check rate limit and truncate chunk if needed
             estimated_calls = estimate_api_calls_for_prs(total_prs)
             sufficient, max_prs = quota_manager.check_sufficient(
-                estimated_calls, repo_ctx, chunk_info_str
+                estimated_calls, repo_ctx, chunk_info_str, get_github_token, logger
             )
 
             if not sufficient:
@@ -1863,7 +1380,9 @@ def main() -> int:
         # Check rate limit before validating repos (1 API call per repo)
         if repos_needing_validation:
             estimated_calls = len(repos_needing_validation)
-            sufficient, _ = quota_manager.check_sufficient(estimated_calls, f"{owner}/*")
+            sufficient, _ = quota_manager.check_sufficient(
+                estimated_calls, f"{owner}/*", "", get_github_token, logger
+            )
             if not sufficient:
                 logger.error(
                     "Insufficient API rate limit to validate %d repositories. "
@@ -1964,7 +1483,7 @@ def main() -> int:
                     show_update_all_progress_summary(tracked_repos, 0)
                     logger.info("Will wait for quota reset, then start processing")
 
-                    if not quota_manager.wait_for_reset():
+                    if not quota_manager.wait_for_reset(logger):
                         return 1
                     # After waiting, refresh quota and reload state
                     quota_manager.initialize(token)
@@ -2034,7 +1553,7 @@ def main() -> int:
                 show_update_all_progress_summary(tracked_repos, completed_repos, failed_repo)
                 logger.info("Will wait for quota reset, then restart from beginning")
 
-                if not quota_manager.wait_for_reset():
+                if not quota_manager.wait_for_reset(logger):
                     logger.error("Failed to wait for quota reset, aborting")
                     return 1
                 # Refresh quota and restart from beginning

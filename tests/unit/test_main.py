@@ -410,7 +410,9 @@ class TestProcessRepository:
             # Mock quota check to fail on second chunk
             call_count = 0
 
-            def mock_check_sufficient(estimated_calls, repo_ctx, chunk_info=""):
+            def mock_check_sufficient(
+                estimated_calls, repo_ctx, chunk_info="", token_getter=None, logger=None
+            ):
                 nonlocal call_count
                 call_count += 1
                 if call_count == 1:

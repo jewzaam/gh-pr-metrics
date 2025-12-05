@@ -2,7 +2,7 @@
 # Environment Setup Targets
 # ==========================
 
-.PHONY: venv uv requirements requirements-dev install-package clean
+.PHONY: venv uv requirements requirements-dev requirements-txt requirements-dev-txt setup-dev install-package clean
 
 venv: ## Create Python virtual environment
 	@if [ ! -d "$(VENV_DIR)" ]; then \
@@ -20,14 +20,26 @@ uv: venv ## Install uv package manager
 		printf "$(GREEN)✅ uv installed$(RESET)\n"; \
 	fi
 
-requirements: venv uv ## Install all dependencies (runtime)
+requirements: venv uv ## Install runtime dependencies (from pyproject.toml)
 	@$(VENV_UV) pip install --upgrade pip >/dev/null
 	@$(VENV_UV) pip install -e .
-	@echo "✅ All dependencies installed in $(VENV_DIR)"
+	@echo "✅ Runtime dependencies installed in $(VENV_DIR)"
 
-requirements-dev: venv uv ## Install all dev dependencies
+requirements-dev: venv uv ## Install all dev dependencies (from pyproject.toml)
 	@$(VENV_UV) pip install -e ".[dev]"
 	@echo "✅ All dev dependencies installed in $(VENV_DIR)"
+
+requirements-txt: venv uv ## Install runtime dependencies from requirements.txt
+	@$(VENV_UV) pip install -r requirements.txt
+	@echo "✅ Runtime dependencies from requirements.txt installed in $(VENV_DIR)"
+
+requirements-dev-txt: venv uv ## Install dev dependencies from requirements-dev.txt
+	@$(VENV_UV) pip install -r requirements-dev.txt
+	@echo "✅ Dev dependencies from requirements-dev.txt installed in $(VENV_DIR)"
+
+setup-dev: requirements-dev-txt ## Install dev deps from requirements-dev.txt + package in editable mode
+	@$(VENV_UV) pip install -e .
+	@echo "✅ Full dev environment ready (requirements-dev.txt + editable package)"
 
 install-package: requirements-dev ## Install package in editable mode (needed for tests)
 	@$(VENV_UV) pip install -e .

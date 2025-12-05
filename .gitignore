@@ -47,6 +47,10 @@ Thumbs.db
 
 # Local data (csv)
 data/
+data-backup/
+pr-analysis/
+.gh-pr-metrics.yaml
+*.csv
 
 # obsidian
 .obsidian/

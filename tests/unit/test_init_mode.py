@@ -193,8 +193,11 @@ class TestInitMode:
         assert not (output_dir / "testowner-repo2.csv").exists()
         assert not (output_dir / "testowner-repo3.csv").exists()
 
-    def test_init_skips_inaccessible_repos(self, requests_mock, tmp_path):
-        """Test that init skips repos without access."""
+    def test_init_initializes_all_repos_without_validation(self, requests_mock, tmp_path):
+        """
+        Test that init initializes all repos without validation.
+        Access errors will show during processing.
+        """
         state_file = tmp_path / "state.yaml"
         output_dir = tmp_path / "data"
         output_pattern = str(output_dir / "{owner}-{repo}.csv")
@@ -217,19 +220,9 @@ class TestInitMode:
         requests_mock.get(
             "https://api.github.com/orgs/testowner/repos",
             json=[
-                {"name": "accessible"},
-                {"name": "private"},
+                {"name": "repo1"},
+                {"name": "repo2"},
             ],
-        )
-
-        # Mock repo validation - one succeeds, one fails
-        requests_mock.get(
-            "https://api.github.com/repos/testowner/accessible",
-            json={"name": "accessible", "owner": {"login": "testowner"}},
-        )
-        requests_mock.get(
-            "https://api.github.com/repos/testowner/private",
-            status_code=404,
         )
 
         with mock.patch.object(
@@ -246,17 +239,14 @@ class TestInitMode:
         ):
             with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
                 result = gh_pr_metrics.main()
-                # Should return 1 because at least one repo failed
-                assert result == 1
+                # Should succeed - all repos initialized without validation
+                assert result == 0
 
-                # Verify state file only has accessible repo (within mock context)
+                # Both repos should be in state (no validation, both initialized)
                 state = gh_pr_metrics.state_manager.load()
-                assert len(state) == 1
-                assert "https://github.com/testowner/accessible" in state
-
-        # CSV files not created until first update with actual data
-        assert not (output_dir / "testowner-accessible.csv").exists()
-        assert not (output_dir / "testowner-private.csv").exists()
+                assert len(state) == 2
+                assert "https://github.com/testowner/repo1" in state
+                assert "https://github.com/testowner/repo2" in state
 
     def test_init_skips_already_tracked_repos(self, requests_mock, tmp_path):
         """Test that init skips repos already in state file."""

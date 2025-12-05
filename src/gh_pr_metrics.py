@@ -10,11 +10,13 @@ requests in a GitHub repository within a specified time range.
 
 import argparse
 import csv
+import json
 import logging
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import yaml
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -44,6 +46,7 @@ __version__ = "0.1.0"
 # Constants
 DEFAULT_DAYS_BACK = 365
 DEFAULT_WORKERS = 4
+DEFAULT_RAW_DATA_DIR = "data/raw"
 STATE_FILE = Path.home() / ".gh-pr-metrics-state.yaml"
 PR_NUMBER_FIELD = "pr_number"
 MAX_CHUNK_DAYS = 30  # Maximum days to process in a single chunk
@@ -101,6 +104,7 @@ class Config:
         self.output_pattern: Optional[str] = config_dict.get("output_pattern")
         self.log_file: str = config_dict.get("log_file", "gh-pr-metrics.log")
         self.default_days_back: int = config_dict.get("default_days_back", DEFAULT_DAYS_BACK)
+        self.raw_data_dir: str = config_dict.get("raw_data_dir", DEFAULT_RAW_DATA_DIR)
 
         # Quota settings
         quota = config_dict.get("quota", {})
@@ -323,12 +327,13 @@ class CSVManager:
     Manages CSV I/O operations for PR metrics.
 
     Handles reading existing CSV files, writing metrics data,
-    and managing field definitions.
+    and managing field definitions. Thread-safe for concurrent access.
     """
 
     def __init__(self, logger=None):
         """Initialize CSV manager with logger."""
         self._logger = logger
+        self._lock = threading.Lock()
 
     def get_fieldnames(self) -> List[str]:
         """Get CSV field names in order."""
@@ -361,28 +366,31 @@ class CSVManager:
 
     def read_csv(self, csv_file: str) -> Dict[int, Dict[str, Any]]:
         """
-        Read existing CSV file and return dict keyed by PR number.
+        Read existing CSV file and return dict keyed by PR number (thread-safe).
         Returns empty dict if file doesn't exist or can't be read.
         """
-        if not os.path.exists(csv_file):
-            return {}
+        with self._lock:
+            if not os.path.exists(csv_file):
+                return {}
 
-        try:
-            existing_data = {}
-            with open(csv_file, "r", newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    # Key by PR number for O(1) lookups
-                    pr_number = int(row[PR_NUMBER_FIELD])
-                    existing_data[pr_number] = row
+            try:
+                existing_data = {}
+                with open(csv_file, "r", newline="", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        # Key by PR number for O(1) lookups
+                        pr_number = int(row[PR_NUMBER_FIELD])
+                        existing_data[pr_number] = row
 
-            if self._logger:
-                self._logger.info("Loaded %d existing PRs from %s", len(existing_data), csv_file)
-            return existing_data
-        except Exception as e:
-            if self._logger:
-                self._logger.warning("Failed to read existing CSV %s: %s", csv_file, e)
-            return {}
+                if self._logger:
+                    self._logger.debug(
+                        "Loaded %d existing PRs from %s", len(existing_data), csv_file
+                    )
+                return existing_data
+            except Exception as e:
+                if self._logger:
+                    self._logger.warning("Failed to read existing CSV %s: %s", csv_file, e)
+                return {}
 
     def write_csv(
         self,
@@ -392,68 +400,200 @@ class CSVManager:
         force_write: bool = False,
     ) -> None:
         """
-        Write metrics to CSV file or stdout.
+        Write metrics to CSV file or stdout (thread-safe).
 
         If merge_mode is True and output_file exists, existing PR data is loaded,
         updated with new metrics, and written back.
 
         If force_write is True, write headers even if metrics list is empty.
         """
-        if not metrics and not force_write:
-            if self._logger:
-                self._logger.warning("No pull requests to output")
-            return
-
-        fieldnames = self.get_fieldnames()
-
-        # Merge with existing data if requested
-        if merge_mode and output_file:
-            existing_data = self.read_csv(output_file)
-
-            # Update existing data with new metrics
-            for metric in metrics:
-                pr_number = metric[PR_NUMBER_FIELD]
-                existing_data[pr_number] = metric
-
-            # Convert back to list
-            all_metrics = list(existing_data.values())
-            if self._logger:
-                self._logger.info(
-                    "Merged data: %d total PRs (%d new/updated)", len(all_metrics), len(metrics)
-                )
-        else:
-            all_metrics = metrics
-
-        if output_file:
-            # Write to temp file first, then atomically rename
-            output_path = Path(output_file)
-            temp_fd, temp_path = tempfile.mkstemp(
-                dir=output_path.parent if output_path.parent.exists() else tempfile.gettempdir(),
-                prefix=".tmp_pr_metrics_",
-                suffix=".csv",
-            )
-
-            try:
-                with os.fdopen(temp_fd, "w", newline="", encoding="utf-8") as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    writer.writeheader()
-                    writer.writerows(all_metrics)
-
-                # Atomic rename
-                os.rename(temp_path, output_file)
+        with self._lock:
+            if not metrics and not force_write:
                 if self._logger:
-                    self._logger.info("Writing output to %s", output_file)
-            except Exception as e:
-                # Keep temp file for debugging
+                    self._logger.warning("No pull requests to output")
+                return
+
+            fieldnames = self.get_fieldnames()
+
+            # Merge with existing data if requested
+            if merge_mode and output_file:
+                # Re-read inside lock to get latest data
+                if not os.path.exists(output_file):
+                    existing_data = {}
+                else:
+                    try:
+                        existing_data = {}
+                        with open(output_file, "r", newline="", encoding="utf-8") as f:
+                            reader = csv.DictReader(f)
+                            for row in reader:
+                                pr_number = int(row[PR_NUMBER_FIELD])
+                                existing_data[pr_number] = row
+                    except Exception:
+                        existing_data = {}
+
+                # Update existing data with new metrics
+                for metric in metrics:
+                    pr_number = metric[PR_NUMBER_FIELD]
+                    existing_data[pr_number] = metric
+
+                # Convert back to list
+                all_metrics = list(existing_data.values())
                 if self._logger:
-                    self._logger.error(
-                        "Failed to write CSV output. Temp file retained at: %s", temp_path
+                    self._logger.debug(
+                        "Merged data: %d total PRs (%d new/updated)", len(all_metrics), len(metrics)
                     )
-                raise e
-        else:
-            writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(all_metrics)
+            else:
+                all_metrics = metrics
+
+            if output_file:
+                # Write to temp file first, then atomically rename
+                output_path = Path(output_file)
+                temp_fd, temp_path = tempfile.mkstemp(
+                    dir=(
+                        output_path.parent if output_path.parent.exists() else tempfile.gettempdir()
+                    ),
+                    prefix=".tmp_pr_metrics_",
+                    suffix=".csv",
+                )
+
+                try:
+                    with os.fdopen(temp_fd, "w", newline="", encoding="utf-8") as f:
+                        writer = csv.DictWriter(f, fieldnames=fieldnames)
+                        writer.writeheader()
+                        writer.writerows(all_metrics)
+
+                    # Atomic rename
+                    os.rename(temp_path, output_file)
+                    if self._logger:
+                        self._logger.debug("Wrote %d PRs to %s", len(all_metrics), output_file)
+                except Exception as e:
+                    # Keep temp file for debugging
+                    if self._logger:
+                        self._logger.error(
+                            "Failed to write CSV output. Temp file retained at: %s", temp_path
+                        )
+                    raise e
+            else:
+                writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(all_metrics)
+
+
+def build_pr_json_data(pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, Any]:
+    """
+    Build complete PR JSON data including all comments and reviews.
+
+    Args:
+        pr: Base PR object from GitHub API
+        owner: Repository owner
+        repo: Repository name
+
+    Returns:
+        Complete PR data dictionary ready for JSON serialization
+    """
+    pr_number = pr["number"]
+
+    # Fetch issue comments
+    issue_comments = []
+    try:
+        comments = github_client.fetch_issue_comments(pr["comments_url"])
+        for comment in comments:
+            issue_comments.append(
+                {
+                    "id": comment.get("id"),
+                    "user": comment.get("user", {}).get("login"),
+                    "user_type": comment.get("user", {}).get("type"),
+                    "body": comment.get("body", ""),
+                    "created_at": comment.get("created_at"),
+                    "updated_at": comment.get("updated_at"),
+                }
+            )
+    except GitHubAPIError as e:
+        logger.debug("Failed to fetch issue comments for PR #%d: %s", pr_number, e)
+
+    # Fetch review comments
+    review_comments = []
+    try:
+        comments = github_client.fetch_review_comments(pr["review_comments_url"])
+        for comment in comments:
+            review_comments.append(
+                {
+                    "id": comment.get("id"),
+                    "user": comment.get("user", {}).get("login"),
+                    "user_type": comment.get("user", {}).get("type"),
+                    "body": comment.get("body", ""),
+                    "path": comment.get("path"),
+                    "line": comment.get("line"),
+                    "created_at": comment.get("created_at"),
+                    "updated_at": comment.get("updated_at"),
+                }
+            )
+    except GitHubAPIError as e:
+        logger.debug("Failed to fetch review comments for PR #%d: %s", pr_number, e)
+
+    # Fetch reviews
+    reviews = []
+    try:
+        review_list = github_client.fetch_reviews(owner, repo, pr_number)
+        for review in review_list:
+            reviews.append(
+                {
+                    "id": review.get("id"),
+                    "user": review.get("user", {}).get("login"),
+                    "user_type": review.get("user", {}).get("type"),
+                    "state": review.get("state"),
+                    "body": review.get("body", ""),
+                    "submitted_at": review.get("submitted_at"),
+                }
+            )
+    except GitHubAPIError as e:
+        logger.debug("Failed to fetch reviews for PR #%d: %s", pr_number, e)
+
+    # Build complete PR data
+    return {
+        "pr_number": pr_number,
+        "title": pr["title"],
+        "author": pr.get("user", {}).get("login"),
+        "author_type": pr.get("user", {}).get("type"),
+        "state": pr["state"],
+        "created_at": pr["created_at"],
+        "updated_at": pr["updated_at"],
+        "merged_at": pr.get("merged_at"),
+        "closed_at": pr.get("closed_at"),
+        "draft": pr.get("draft", False),
+        "url": pr["html_url"],
+        "additions": pr.get("additions", 0),
+        "deletions": pr.get("deletions", 0),
+        "changed_files": pr.get("changed_files", 0),
+        "issue_comments": issue_comments,
+        "review_comments": review_comments,
+        "reviews": reviews,
+    }
+
+
+def write_pr_json(raw_data_dir: str, owner: str, repo: str, pr_data: Dict[str, Any]) -> None:
+    """
+    Write PR data to JSON file in provider-aware directory structure.
+
+    Args:
+        raw_data_dir: Base directory for raw data (e.g., "data/raw")
+        owner: Repository owner
+        repo: Repository name
+        pr_data: Complete PR data dictionary
+    """
+    # Provider-aware path: raw_data_dir/github.com/owner/repo/
+    output_dir = Path(raw_data_dir) / "github.com" / owner / repo
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    pr_number = pr_data["pr_number"]
+    json_file = output_dir / f"{pr_number}.json"
+
+    try:
+        with open(json_file, "w", encoding="utf-8") as f:
+            json.dump(pr_data, f, indent=2, ensure_ascii=False)
+        logger.debug("Wrote PR #%d JSON to %s", pr_number, json_file)
+    except Exception as e:
+        logger.warning("Failed to write PR #%d JSON: %s", pr_number, e)
 
 
 class LoggingManager:
@@ -517,6 +657,68 @@ def get_ready_for_review_time(
             logger.debug("Failed to fetch events for PR #%d: %s", pr["number"], e)
 
     return pr["created_at"]
+
+
+def count_comments_from_json(
+    pr_json_data: Dict[str, Any],
+    config: Config,
+) -> tuple[int, int, int, str, str]:
+    """
+    Count comments from pre-fetched PR JSON data.
+    Returns (total_comments, non_ai_bot_comments, ai_bot_comments, non_ai_bot_names, ai_bot_names).
+    """
+    total_comments = 0
+    non_ai_bot_comments = 0
+    ai_bot_comments = 0
+    non_ai_bot_logins = set()
+    ai_bot_logins = set()
+
+    # Count issue comments
+    for comment in pr_json_data.get("issue_comments", []):
+        if comment.get("user_type") == "Bot":
+            total_comments += 1
+            login = comment.get("user", "")
+            body = comment.get("body", "")
+            if config.is_ai_bot(login, body):
+                ai_bot_logins.add(login)
+                ai_bot_comments += 1
+            else:
+                non_ai_bot_logins.add(login)
+                non_ai_bot_comments += 1
+
+    # Count review comments
+    for comment in pr_json_data.get("review_comments", []):
+        if comment.get("user_type") == "Bot":
+            total_comments += 1
+            login = comment.get("user", "")
+            body = comment.get("body", "")
+            if config.is_ai_bot(login, body):
+                ai_bot_logins.add(login)
+                ai_bot_comments += 1
+            else:
+                non_ai_bot_logins.add(login)
+                non_ai_bot_comments += 1
+
+    # Count review bodies
+    for review in pr_json_data.get("reviews", []):
+        body = review.get("body", "")
+        if body and review.get("user_type") == "Bot":
+            total_comments += 1
+            login = review.get("user", "")
+            if config.is_ai_bot(login, body):
+                ai_bot_logins.add(login)
+                ai_bot_comments += 1
+            else:
+                non_ai_bot_logins.add(login)
+                non_ai_bot_comments += 1
+
+    return (
+        total_comments,
+        non_ai_bot_comments,
+        ai_bot_comments,
+        ",".join(sorted(non_ai_bot_logins)),
+        ",".join(sorted(ai_bot_logins)),
+    )
 
 
 def count_comments(
@@ -644,6 +846,34 @@ def count_comments(
     )
 
 
+def get_review_metrics_from_json(reviews: List[Dict[str, Any]]) -> tuple[int, int, int]:
+    """
+    Get review metrics from pre-fetched reviews.
+    Returns (changes_requested_count, unique_change_requesters, approval_count).
+    """
+    # Count total change requests
+    changes_requested_count = sum(1 for r in reviews if r.get("state") == "CHANGES_REQUESTED")
+
+    # Count unique reviewers who requested changes
+    change_requesters = {
+        r.get("user", "")
+        for r in reviews
+        if r.get("state") == "CHANGES_REQUESTED" and r.get("user")
+    }
+    unique_change_requesters = len(change_requesters)
+
+    # Get most recent review state per reviewer for approvals
+    reviewer_states: Dict[str, str] = {}
+    for review in reviews:
+        if review.get("user") and review.get("state"):
+            user = review.get("user")
+            reviewer_states[user] = review["state"]
+
+    approval_count = sum(1 for state in reviewer_states.values() if state == "APPROVED")
+
+    return changes_requested_count, unique_change_requesters, approval_count
+
+
 def get_review_metrics(
     pr: Dict[str, Any],
     owner: str,
@@ -703,9 +933,27 @@ def determine_pr_status(pr: Dict[str, Any]) -> str:
 
 
 def process_pr(
-    pr: Dict[str, Any], owner: str, repo: str, token: Optional[str], config: Config
+    pr: Dict[str, Any],
+    pr_json_data: Dict[str, Any],
+    owner: str,
+    repo: str,
+    token: Optional[str],
+    config: Config,
 ) -> Dict[str, Any]:
-    """Process a single PR and extract all metrics."""
+    """
+    Process a single PR and extract metrics from fetched JSON data.
+
+    Args:
+        pr: Base PR object
+        pr_json_data: Complete PR data from build_pr_json_data (includes comments, reviews)
+        owner: Repository owner
+        repo: Repository name
+        token: GitHub token
+        config: Configuration object
+
+    Returns:
+        Metrics dictionary for CSV
+    """
     pr_number = pr["number"]
     logger.debug("Processing PR #%d: %s", pr_number, pr["title"])
 
@@ -726,18 +974,13 @@ def process_pr(
         metrics["ready_for_review_at"] = pr["created_at"]
         errors.append(f"ready_time: {e}")
 
-    # Fetch reviews once for both comment counting and review metrics
-    try:
-        reviews = github_client.fetch_reviews(owner, repo, pr_number)
-    except GitHubAPIError as e:
-        logger.debug("Failed to fetch reviews for PR #%d: %s", pr_number, e)
-        reviews = []
-        errors.append(f"reviews_fetch: {e}")
+    # Use reviews from pr_json_data
+    reviews = pr_json_data.get("reviews", [])
 
-    # Comment counts (including review bodies)
+    # Comment counts (including review bodies) - use data from pr_json_data
     try:
         total_comments, non_ai_bot_comments, ai_bot_comments, non_ai_bot_names, ai_bot_names = (
-            count_comments(pr, owner, repo, token, config, reviews)
+            count_comments_from_json(pr_json_data, config)
         )
         metrics["total_comment_count"] = total_comments
         metrics["non_ai_bot_comment_count"] = non_ai_bot_comments
@@ -753,11 +996,9 @@ def process_pr(
         metrics["ai_bot_login_names"] = ""
         errors.append(f"comments: {e}")
 
-    # Review metrics
+    # Review metrics - use reviews from pr_json_data
     try:
-        changes_requested, unique_requesters, approvals = get_review_metrics(
-            pr, owner, repo, token, reviews
-        )
+        changes_requested, unique_requesters, approvals = get_review_metrics_from_json(reviews)
         metrics["changes_requested_count"] = changes_requested
         metrics["unique_change_requesters"] = unique_requesters
         metrics["approval_count"] = approvals
@@ -949,6 +1190,20 @@ def show_update_all_progress_summary(
     logger.info("  Needs processing (> 12 hours): %d repos", needs_processing)
 
 
+def fetch_and_process_pr(
+    pr: Dict[str, Any], owner: str, repo: str, token: Optional[str], config: Config
+) -> Dict[str, Any]:
+    """
+    Fetch complete PR data, process metrics, and write JSON.
+
+    Returns metrics dict for CSV.
+    """
+    pr_json_data = build_pr_json_data(pr, owner, repo)
+    pr_metrics = process_pr(pr, pr_json_data, owner, repo, token, config)
+    write_pr_json(config.raw_data_dir, owner, repo, pr_json_data)
+    return pr_metrics
+
+
 def update_single_pr(
     owner: str,
     repo: str,
@@ -972,7 +1227,7 @@ def update_single_pr(
 
     logger.info("Processing PR #%d", pr_number)
     try:
-        pr_metrics = process_pr(pr, owner, repo, token, config)
+        pr_metrics = fetch_and_process_pr(pr, owner, repo, token, config)
     except Exception as e:
         logger.error("Failed to process PR #%d: %s", pr_number, e)
         return 1
@@ -1133,9 +1388,10 @@ def process_repository(
                 workers,
             )
 
+            # Process PRs in parallel - each writes to CSV immediately (thread-safe)
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 future_to_pr = {
-                    executor.submit(process_pr, pr, owner, repo, token, config): pr
+                    executor.submit(fetch_and_process_pr, pr, owner, repo, token, config): pr
                     for pr in prs_chunk
                 }
 
@@ -1145,7 +1401,11 @@ def process_repository(
                     pr_number = pr["number"]
                     try:
                         pr_metrics = future.result()
+
+                        # Write to CSV immediately (thread-safe)
+                        csv_manager.write_csv([pr_metrics], output_file, merge_mode=True)
                         metrics.append(pr_metrics)
+
                         logger.info(
                             "[%s] %s: Completed PR %d/%d: #%d (updated: %s)",
                             repo_ctx,
@@ -1164,10 +1424,7 @@ def process_repository(
                             e,
                         )
 
-            # Write output for this chunk (always merge after first chunk)
-            chunk_merge_mode = merge_mode or (chunk_num > 1)
-            csv_manager.write_csv(metrics, output_file, merge_mode=chunk_merge_mode)
-
+            # CSV already written incrementally during processing
             # Find the timestamp to set in the state file
             if prs_chunk:
                 # Default to the updated_at of the last PR in this chunk
@@ -1372,28 +1629,13 @@ def main() -> int:
 
         if already_tracked_count > 0:
             logger.info(
-                "%d repositories already tracked, %d need validation",
+                "%d repositories already tracked, %d need initialization",
                 already_tracked_count,
                 len(repos_needing_validation),
             )
 
-        # Check rate limit before validating repos (1 API call per repo)
-        if repos_needing_validation:
-            estimated_calls = len(repos_needing_validation)
-            sufficient, _ = quota_manager.check_sufficient(
-                estimated_calls, f"{owner}/*", "", get_github_token, logger
-            )
-            if not sufficient:
-                logger.error(
-                    "Insufficient API rate limit to validate %d repositories. "
-                    "Each repo requires 1 API call for access validation.",
-                    len(repos_needing_validation),
-                )
-                return 1
-
-        # Validate access and initialize each repo
+        # Initialize repos without validation (errors will appear during actual processing)
         successful = 0
-        failed = 0
         skipped = 0
 
         for repo in repos_to_init:
@@ -1407,13 +1649,6 @@ def main() -> int:
                     existing_state["timestamp"].isoformat(),
                 )
                 skipped += 1
-                continue
-
-            # Validate access
-            logger.info("[%s/%s] Validating access...", owner, repo)
-            if not github_client.validate_repo_access(owner, repo):
-                logger.warning("[%s/%s] Cannot access repository, skipping", owner, repo)
-                failed += 1
                 continue
 
             # Expand output pattern
@@ -1438,12 +1673,8 @@ def main() -> int:
         # Summary
         logger.info("=" * 80)
         logger.info("Initialization complete:")
-        logger.info("  Successful: %d", successful)
+        logger.info("  Initialized: %d", successful)
         logger.info("  Skipped (already tracked): %d", skipped)
-        logger.info("  Failed (no access): %d", failed)
-
-        if failed > 0:
-            return 1
         return 0
 
     # Handle update-all mode
@@ -1674,9 +1905,10 @@ def main() -> int:
 
             logger.info("Processing %d PRs with %d workers", total_prs, workers)
 
+            # Process PRs in parallel
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 future_to_pr = {
-                    executor.submit(process_pr, pr, owner, repo, token, config): pr
+                    executor.submit(fetch_and_process_pr, pr, owner, repo, token, config): pr
                     for pr in all_prs
                 }
 
@@ -1686,6 +1918,7 @@ def main() -> int:
                     try:
                         pr_metrics = future.result()
                         metrics.append(pr_metrics)
+
                         logger.info(
                             "Completed PR %d/%d: #%d (updated: %s)",
                             completed,

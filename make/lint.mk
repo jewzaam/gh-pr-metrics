@@ -5,10 +5,10 @@
 .PHONY: lint format
 
 lint: requirements-dev ## Run linting and type checking
-	@$(VENV_PYTHON) -m flake8 --max-line-length=100 --extend-ignore=E203,W503 src/ tests/
+	@$(VENV_PYTHON) -m flake8 --max-line-length=100 --extend-ignore=E203,W503 src/ tests/ utility/
 	@printf "$(GREEN)✅ Linting complete$(RESET)\n"
 
 format: requirements-dev ## Format code
-	@$(VENV_PYTHON) -m black --line-length 100 src/ tests/
+	@$(VENV_PYTHON) -m black --line-length 100 src/ tests/ utility/
 	@printf "$(GREEN)✅ Code formatted$(RESET)\n"
 

@@ -42,7 +42,7 @@ class TestPRStatusDetermination:
         requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
         requests_mock.get(reviews_url, json=[])
 
-        result = gh_pr_metrics.process_pr(pr, "owner", "repo", None, default_config)
+        result = gh_pr_metrics.process_pr(pr, {}, "owner", "repo", None, default_config)
         assert result["merged_at"] == "2024-01-05T12:00:00Z"
         assert result["closed_at"] == "2024-01-05T12:00:00Z"
         assert result["status"] == "merged"
@@ -76,7 +76,7 @@ class TestPRStatusDetermination:
         requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
         requests_mock.get(reviews_url, json=[])
 
-        result = gh_pr_metrics.process_pr(pr, "owner", "repo", None, default_config)
+        result = gh_pr_metrics.process_pr(pr, {}, "owner", "repo", None, default_config)
         assert result["merged_at"] == ""  # Not merged
         assert result["closed_at"] == "2024-01-10T15:30:00Z"
         assert result["status"] == "closed"
@@ -439,7 +439,7 @@ class TestDerivedTimeMetrics:
         requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
         requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
 
-        result = gh_pr_metrics.process_pr(pr, "owner", "repo", None, default_config)
+        result = gh_pr_metrics.process_pr(pr, {}, "owner", "repo", None, default_config)
 
         assert result["days_open"] == 10.0
         assert result["days_in_review"] == 10.0  # Never draft, so same as days_open
@@ -470,7 +470,7 @@ class TestDerivedTimeMetrics:
         requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
         requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
 
-        result = gh_pr_metrics.process_pr(pr, "owner", "repo", None, default_config)
+        result = gh_pr_metrics.process_pr(pr, {}, "owner", "repo", None, default_config)
 
         assert result["days_open"] == 10.0  # Jan 1 → Jan 11
         assert result["days_in_review"] == 7.0  # Jan 4 (ready) → Jan 11
@@ -506,7 +506,7 @@ class TestDerivedTimeMetrics:
         requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
         requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
 
-        result = gh_pr_metrics.process_pr(pr, "owner", "repo", None, default_config)
+        result = gh_pr_metrics.process_pr(pr, {}, "owner", "repo", None, default_config)
 
         # Should be approximately 5 days (allow small variance for test execution time)
         assert 4.99 <= result["days_open"] <= 5.01
@@ -535,7 +535,7 @@ class TestDerivedTimeMetrics:
         requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
         requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
 
-        result = gh_pr_metrics.process_pr(pr, "owner", "repo", None, default_config)
+        result = gh_pr_metrics.process_pr(pr, {}, "owner", "repo", None, default_config)
 
         # Should have empty strings for time metrics
         assert result["days_open"] == ""
@@ -572,7 +572,7 @@ class TestComplexityMetrics:
         requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
         requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
 
-        result = gh_pr_metrics.process_pr(pr, "owner", "repo", None, default_config)
+        result = gh_pr_metrics.process_pr(pr, {}, "owner", "repo", None, default_config)
 
         assert result["lines_added"] == 150
         assert result["lines_deleted"] == 50
@@ -603,7 +603,7 @@ class TestComplexityMetrics:
         requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
         requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
 
-        result = gh_pr_metrics.process_pr(pr, "owner", "repo", None, default_config)
+        result = gh_pr_metrics.process_pr(pr, {}, "owner", "repo", None, default_config)
 
         assert result["lines_added"] == 0
         assert result["lines_deleted"] == 0
@@ -636,6 +636,6 @@ class TestComplexityMetrics:
         requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
         requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
 
-        result = gh_pr_metrics.process_pr(pr, "owner", "repo", None, default_config)
+        result = gh_pr_metrics.process_pr(pr, {}, "owner", "repo", None, default_config)
 
         assert result["total_line_changes"] == 800  # 500 + 300

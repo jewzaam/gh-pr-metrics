@@ -80,12 +80,29 @@ def disable_file_logging(monkeypatch):
     monkeypatch.setattr(gh_pr_metrics, "setup_logging", test_setup_logging)
 
 
+@pytest.fixture(autouse=True)
+def isolate_raw_data_dir(tmp_path, monkeypatch):
+    """
+    Isolate raw data directory for JSON output during tests.
+
+    Prevents tests from polluting data/raw/ with test artifacts.
+    """
+    import gh_pr_metrics
+
+    # Patch DEFAULT_RAW_DATA_DIR to use temp directory
+    test_raw_dir = str(tmp_path / "test_raw_data")
+    monkeypatch.setattr(gh_pr_metrics, "DEFAULT_RAW_DATA_DIR", test_raw_dir)
+
+    yield test_raw_dir
+
+
 @pytest.fixture
-def default_config():
+def default_config(tmp_path):
     """
     Provide a default Config object for tests.
 
     Uses the same default values as the production config file.
+    Isolates raw_data_dir to temp directory to prevent test pollution.
     """
     import gh_pr_metrics
 
@@ -104,6 +121,7 @@ def default_config():
         "output_pattern": None,
         "log_file": "gh-pr-metrics.log",
         "default_days_back": 365,
+        "raw_data_dir": str(tmp_path / "test_raw_data"),  # Isolate to temp directory
         "quota": {"reserve": 100, "min_buffer": 50},
     }
 

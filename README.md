@@ -15,11 +15,29 @@ Analyzes GitHub pull requests and generates CSV reports with metrics including:
 
 ## Installation
 
+### From Source (Recommended for Development)
+
 ```bash
+# Clone the repository
+git clone https://github.com/yourusername/gh-pr-metrics.git
+cd gh-pr-metrics
+
+# Install the tool
 make install
 ```
 
 This installs the `gh-pr-metrics` command to `~/.local/bin` (ensure it's in your PATH).
+
+### Using pip
+
+```bash
+# Install from source
+pip install -e .
+
+# Or install dependencies only
+pip install -r requirements.txt
+pip install -r requirements-dev.txt  # For development
+```
 
 ## Usage
 
@@ -124,9 +142,28 @@ https://github.com/org1/repo1:
 
 **Note**: `--update` and `--output` cannot be used together. Update mode always uses the CSV path stored in the state file.
 
+### Configuration
+
+The tool supports optional configuration via `.gh-pr-metrics.yaml` in your current directory. See `gh-pr-metrics.yaml.example` for all available options:
+
+```bash
+# Copy example config and customize
+cp gh-pr-metrics.yaml.example .gh-pr-metrics.yaml
+```
+
+Key configuration options:
+- **AI bot detection**: Customize which bots are classified as AI-powered
+- **Workers**: Parallel processing (default: 4, automatically reduced to 1 without token)
+- **Output pattern**: Default file naming pattern with placeholders
+- **Quota management**: Rate limit reserves and buffers
+
 ### Authentication
 
 Set `GITHUB_TOKEN` environment variable for private repositories or to avoid rate limits:
+
+```bash
+export GITHUB_TOKEN="your_github_token_here"
+```
 
 **Note:** Without a token, the tool automatically uses `--workers=1` to reduce API load for unauthenticated rate limit (60 requests/hour).
 
@@ -171,14 +208,14 @@ make requirements-dev
 
 # Code quality checks
 make format    # Auto-format code with black
-make lint      # Check code with ruff
+make lint      # Check code with flake8
 make test      # Run unit tests
 make coverage  # Verify 70%+ test coverage
 ```
 
 ### Contribution Guidelines
 
-1. Follow PEP 8 style (enforced by `ruff`)
+1. Follow PEP 8 style (enforced by `flake8`)
 2. Add tests for new features
 3. Ensure `make format lint test coverage` passes
 4. Include `Assisted-by: <Tool> (<Model>)` in commit messages

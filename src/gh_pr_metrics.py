@@ -44,7 +44,6 @@ from github_api import (
 __version__ = "0.1.0"
 
 # Constants
-DEFAULT_DAYS_BACK = 365
 DEFAULT_WORKERS = 4
 DEFAULT_RAW_DATA_DIR = "data/raw"
 STATE_FILE = Path.home() / ".gh-pr-metrics-state.yaml"
@@ -103,13 +102,7 @@ class Config:
         self.workers: int = config_dict.get("workers", DEFAULT_WORKERS)
         self.output_pattern: Optional[str] = config_dict.get("output_pattern")
         self.log_file: str = config_dict.get("log_file", "gh-pr-metrics.log")
-        self.default_days_back: int = config_dict.get("default_days_back", DEFAULT_DAYS_BACK)
         self.raw_data_dir: str = config_dict.get("raw_data_dir", DEFAULT_RAW_DATA_DIR)
-
-        # Quota settings
-        quota = config_dict.get("quota", {})
-        self.quota_reserve: int = quota.get("reserve", 100)
-        self.quota_min_buffer: int = quota.get("min_buffer", 50)
 
     def is_ai_bot(self, login: str, comment_body: str = "") -> bool:
         """
@@ -1494,8 +1487,15 @@ def main() -> int:
         logger.error("--init requires --owner")
         return 1
 
-    if args.init and not args.output:
-        logger.error("--init requires --output (supports patterns like 'data/{owner}-{repo}.csv')")
+    if args.init and not (args.output or config.output_pattern):
+        logger.error(
+            "--init requires --output or output_pattern in config "
+            "(supports patterns like 'data/{owner}-{repo}.csv')"
+        )
+        return 1
+
+    if args.init and not args.start:
+        logger.error("--init requires --start to specify the starting date")
         return 1
 
     if args.init and args.end:
@@ -1544,6 +1544,11 @@ def main() -> int:
 
     if args.pr and not args.output and not config.output_pattern:
         logger.error("--pr requires --output or config output_pattern to specify the CSV file")
+        return 1
+
+    # Regular mode requires --start (update modes use state file timestamps)
+    if not (args.init or args.update or args.update_all or args.pr) and not args.start:
+        logger.error("--start is required to specify the starting date")
         return 1
 
     # Get GitHub token and initialize client
@@ -1610,12 +1615,8 @@ def main() -> int:
             logger.error("No repositories found for owner: %s", owner)
             return 1
 
-        # Determine start date
-        if args.start:
-            start_date = parse_timestamp(args.start)
-        else:
-            start_date = datetime.now(timezone.utc) - timedelta(days=DEFAULT_DAYS_BACK)
-
+        # Parse start date (required for --init)
+        start_date = parse_timestamp(args.start)
         logger.info("Using start date: %s", start_date.isoformat())
 
         # Filter out already-tracked repos to get accurate count
@@ -1652,7 +1653,8 @@ def main() -> int:
                 continue
 
             # Expand output pattern
-            csv_file = expand_output_pattern(args.output, owner, repo)
+            output_pattern = args.output or config.output_pattern
+            csv_file = expand_output_pattern(output_pattern, owner, repo)
 
             # Create parent directory if needed
             csv_path = Path(csv_file)
@@ -1862,17 +1864,16 @@ def main() -> int:
         return exit_code
 
     # Regular mode (non-update)
-    if not args.output:
+    output_pattern = args.output or config.output_pattern
+    if not output_pattern:
         output_file = None  # stdout
     else:
         # Expand output pattern with owner/repo placeholders
-        output_file = expand_output_pattern(args.output, owner, repo)
+        output_file = expand_output_pattern(output_pattern, owner, repo)
 
-    # Get time range from args or defaults
+    # Get time range from args (--start is required, validated above)
     end_date = parse_timestamp(args.end) if args.end else datetime.now(timezone.utc)
-    start_date = (
-        parse_timestamp(args.start) if args.start else end_date - timedelta(days=DEFAULT_DAYS_BACK)
-    )
+    start_date = parse_timestamp(args.start)
 
     if start_date >= end_date:
         logger.error("Start date must be before end date")

@@ -51,21 +51,3 @@ output_pattern: null
 # Logs are appended, includes timestamps and API quota status
 # Default: gh-pr-metrics.log
 log_file: "gh-pr-metrics.log"
-
-# Default lookback period in days when --start not specified
-# Used for initial runs and repo initialization
-# Default: 365 (1 year)
-default_days_back: 365
-
-# GitHub API quota management (config only, not available via CLI)
-# Prevents complete exhaustion of rate limit
-quota:
-  # Reserve quota - percentage of total limit to reserve
-  # Processing stops if remaining quota drops below 5% of limit
-  # Default: 100 (for 5000 limit = 250 reserved)
-  reserve: 100
-  
-  # Minimum buffer for rate limit safety checks
-  # Absolute minimum calls to keep in reserve
-  # Default: 50
-  min_buffer: 50

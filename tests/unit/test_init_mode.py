@@ -233,6 +233,8 @@ class TestInitMode:
                 "--init",
                 "--owner",
                 "testowner",
+                "--start",
+                "2024-01-01",
                 "--output",
                 output_pattern,
             ],
@@ -304,6 +306,8 @@ class TestInitMode:
                 "--init",
                 "--owner",
                 "testowner",
+                "--start",
+                "2024-01-01",
                 "--output",
                 output_pattern,
             ],
@@ -318,58 +322,8 @@ class TestInitMode:
                 # Existing repo should keep its original csv_file
                 assert state["https://github.com/testowner/existing"]["csv_file"] == str(csv_file)
 
-    def test_init_uses_default_start_date(self, requests_mock, tmp_path):
-        """Test that init uses default start date when --start not provided."""
-        state_file = tmp_path / "state.yaml"
-        csv_file = tmp_path / "test.csv"
 
-        # Mock rate limit check at startup
-        requests_mock.get(
-            "https://api.github.com/rate_limit",
-            json={
-                "resources": {
-                    "core": {
-                        "limit": 5000,
-                        "remaining": 4999,
-                        "reset": 1699999999,
-                    }
-                }
-            },
-        )
-
-        # Mock repo validation
-        requests_mock.get(
-            "https://api.github.com/repos/testowner/testrepo",
-            json={"name": "testrepo", "owner": {"login": "testowner"}},
-        )
-
-        with mock.patch.object(
-            sys,
-            "argv",
-            [
-                "gh-pr-metrics",
-                "--init",
-                "--owner",
-                "testowner",
-                "--repo",
-                "testrepo",
-                "--output",
-                str(csv_file),
-            ],
-        ):
-            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
-                result = gh_pr_metrics.main()
-                assert result == 0
-
-                # Verify state file has a timestamp (should be 365 days ago by default)
-                state = gh_pr_metrics.state_manager.load()
-                repo_key = "https://github.com/testowner/testrepo"
-                assert repo_key in state
-                # Just verify timestamp exists and is valid
-                timestamp_str = state[repo_key]["timestamp"]
-                assert timestamp_str
-                gh_pr_metrics.parse_timestamp(timestamp_str)
-
+class TestExpandPattern:
     """Test expand_output_pattern function."""
 
     def test_expand_basic_pattern(self):

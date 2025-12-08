@@ -338,3 +338,127 @@ class TestStateManagement:
             assert exit_code == 1
             assert chunks_completed == 0  # Initialized to 0
             assert total_chunks_fetched == 0  # Error before fetch completed
+
+    def test_mark_pr_failed_new_repo(self, tmp_path):
+        """Test marking a PR as failed for a repo not in state."""
+        state_file = tmp_path / "state.yaml"
+
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            gh_pr_metrics.state_manager.mark_pr_failed("owner", "repo", 123)
+
+            state = gh_pr_metrics.state_manager.load()
+            assert "https://github.com/owner/repo" in state
+            assert "failed_prs" in state["https://github.com/owner/repo"]
+            assert 123 in state["https://github.com/owner/repo"]["failed_prs"]
+
+    def test_mark_pr_failed_existing_repo(self, tmp_path):
+        """Test marking a PR as failed for a repo already in state."""
+        state_file = tmp_path / "state.yaml"
+        state_file.write_text(
+            "https://github.com/owner/repo:\n  csv_file: metrics.csv\n"
+            "  timestamp: '2024-01-01T00:00:00'\n"
+        )
+
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            gh_pr_metrics.state_manager.mark_pr_failed("owner", "repo", 456)
+
+            state = gh_pr_metrics.state_manager.load()
+            assert "failed_prs" in state["https://github.com/owner/repo"]
+            assert 456 in state["https://github.com/owner/repo"]["failed_prs"]
+            # Original fields preserved
+            assert state["https://github.com/owner/repo"]["csv_file"] == "metrics.csv"
+
+    def test_mark_pr_failed_no_duplicates(self, tmp_path):
+        """Test marking same PR as failed multiple times doesn't create duplicates."""
+        state_file = tmp_path / "state.yaml"
+
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            gh_pr_metrics.state_manager.mark_pr_failed("owner", "repo", 789)
+            gh_pr_metrics.state_manager.mark_pr_failed("owner", "repo", 789)
+            gh_pr_metrics.state_manager.mark_pr_failed("owner", "repo", 789)
+
+            state = gh_pr_metrics.state_manager.load()
+            failed_prs = state["https://github.com/owner/repo"]["failed_prs"]
+            assert failed_prs.count(789) == 1
+
+    def test_mark_pr_succeeded_removes_from_list(self, tmp_path):
+        """Test marking a PR as succeeded removes it from failed list."""
+        state_file = tmp_path / "state.yaml"
+        state_file.write_text(
+            "https://github.com/owner/repo:\n"
+            "  csv_file: metrics.csv\n"
+            "  timestamp: '2024-01-01T00:00:00'\n"
+            "  failed_prs:\n"
+            "  - 111\n"
+            "  - 222\n"
+            "  - 333\n"
+        )
+
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            gh_pr_metrics.state_manager.mark_pr_succeeded("owner", "repo", 222)
+
+            state = gh_pr_metrics.state_manager.load()
+            failed_prs = state["https://github.com/owner/repo"]["failed_prs"]
+            assert 222 not in failed_prs
+            assert 111 in failed_prs
+            assert 333 in failed_prs
+
+    def test_mark_pr_succeeded_nonexistent_pr(self, tmp_path):
+        """Test marking non-failed PR as succeeded doesn't error."""
+        state_file = tmp_path / "state.yaml"
+        state_file.write_text(
+            "https://github.com/owner/repo:\n"
+            "  failed_prs:\n"
+            "  - 111\n"
+        )
+
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            # Should not error
+            gh_pr_metrics.state_manager.mark_pr_succeeded("owner", "repo", 999)
+
+            state = gh_pr_metrics.state_manager.load()
+            assert 111 in state["https://github.com/owner/repo"]["failed_prs"]
+
+    def test_get_failed_prs_empty(self, tmp_path):
+        """Test getting failed PRs when none exist."""
+        state_file = tmp_path / "state.yaml"
+
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            failed_prs = gh_pr_metrics.state_manager.get_failed_prs("owner", "repo")
+            assert failed_prs == []
+
+    def test_get_failed_prs_with_failures(self, tmp_path):
+        """Test getting failed PRs when some exist."""
+        state_file = tmp_path / "state.yaml"
+        state_file.write_text(
+            "https://github.com/owner/repo:\n"
+            "  failed_prs:\n"
+            "  - 10\n"
+            "  - 20\n"
+            "  - 30\n"
+        )
+
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            failed_prs = gh_pr_metrics.state_manager.get_failed_prs("owner", "repo")
+            assert failed_prs == [10, 20, 30]
+
+    def test_get_all_failed_prs_count_multiple_repos(self, tmp_path):
+        """Test getting total count of failed PRs across all repos."""
+        state_file = tmp_path / "state.yaml"
+        state_file.write_text(
+            "https://github.com/owner1/repo1:\n"
+            "  failed_prs:\n"
+            "  - 1\n"
+            "  - 2\n"
+            "https://github.com/owner2/repo2:\n"
+            "  failed_prs:\n"
+            "  - 3\n"
+            "  - 4\n"
+            "  - 5\n"
+            "https://github.com/owner3/repo3:\n"
+            "  timestamp: '2024-01-01T00:00:00'\n"
+        )
+
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            count = gh_pr_metrics.state_manager.get_all_failed_prs_count()
+            assert count == 5  # 2 from repo1 + 3 from repo2 + 0 from repo3

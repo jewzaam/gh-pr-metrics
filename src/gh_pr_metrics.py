@@ -273,6 +273,61 @@ class StateManager:
         state[repo_key] = {"timestamp": utc_timestamp.isoformat(), "csv_file": csv_file}
         self.save(state)
 
+    def mark_pr_failed(self, owner: str, repo: str, pr_number: int) -> None:
+        """Mark a PR as failed. Will be retried on next run."""
+        state = self.load()
+        repo_key = self.get_repo_remote_url(owner, repo)
+
+        if repo_key not in state:
+            state[repo_key] = {}
+
+        if not isinstance(state[repo_key], dict):
+            state[repo_key] = {"timestamp": state[repo_key]}
+
+        if "failed_prs" not in state[repo_key]:
+            state[repo_key]["failed_prs"] = []
+
+        if pr_number not in state[repo_key]["failed_prs"]:
+            state[repo_key]["failed_prs"].append(pr_number)
+
+        self.save(state)
+        if self._logger:
+            self._logger.warning("Marked PR #%d as failed for %s/%s", pr_number, owner, repo)
+
+    def mark_pr_succeeded(self, owner: str, repo: str, pr_number: int) -> None:
+        """Remove a PR from failed list after successful fetch."""
+        state = self.load()
+        repo_key = self.get_repo_remote_url(owner, repo)
+
+        if repo_key in state and isinstance(state[repo_key], dict):
+            failed_prs = state[repo_key].get("failed_prs", [])
+            if pr_number in failed_prs:
+                failed_prs.remove(pr_number)
+                state[repo_key]["failed_prs"] = failed_prs
+                self.save(state)
+                if self._logger:
+                    self._logger.info(
+                        "Removed PR #%d from failed list for %s/%s", pr_number, owner, repo
+                    )
+
+    def get_failed_prs(self, owner: str, repo: str) -> List[int]:
+        """Get list of failed PR numbers for a repository."""
+        state = self.load()
+        repo_key = self.get_repo_remote_url(owner, repo)
+
+        if repo_key in state and isinstance(state[repo_key], dict):
+            return state[repo_key].get("failed_prs", [])
+        return []
+
+    def get_all_failed_prs_count(self) -> int:
+        """Get total count of failed PRs across all repositories."""
+        state = self.load()
+        total = 0
+        for entry in state.values():
+            if isinstance(entry, dict):
+                total += len(entry.get("failed_prs", []))
+        return total
+
     def get_all_tracked_repos(self) -> List[Dict[str, Any]]:
         """
         Get all tracked repositories from state file.
@@ -620,6 +675,7 @@ class PRFetcher:
         quota_manager: QuotaManager,
         config: Config,
         logger: logging.Logger,
+        state_manager: StateManager,
     ):
         """
         Initialize PRFetcher.
@@ -629,11 +685,13 @@ class PRFetcher:
             quota_manager: API quota manager
             config: Application configuration
             logger: Logger instance
+            state_manager: State manager for tracking failed PRs
         """
         self.github_client = github_client
         self.quota_manager = quota_manager
         self.config = config
         self.logger = logger
+        self.state_manager = state_manager
 
     def fetch_pr_list(
         self, owner: str, repo: str, start_date: datetime, end_date: datetime
@@ -800,8 +858,18 @@ class PRFetcher:
         Returns:
             Complete PR data dictionary (same data written to JSON)
         """
+        pr_number = pr["number"]
         pr_data = self.fetch_pr_details(pr, owner, repo)
         self.write_pr_json(owner, repo, pr_data)
+
+        # Track success/failure in state file
+        if "fetch_errors" in pr_data and pr_data["fetch_errors"]:
+            # Had errors during fetch - mark as failed for retry
+            self.state_manager.mark_pr_failed(owner, repo, pr_number)
+        else:
+            # Successful fetch - remove from failed list if present
+            self.state_manager.mark_pr_succeeded(owner, repo, pr_number)
+
         return pr_data
 
 
@@ -1648,7 +1716,7 @@ def update_single_pr(
     logger.info("Processing PR #%d", pr_number)
     try:
         # Create PRFetcher and MetricsGenerator instances
-        pr_fetcher = PRFetcher(github_client, quota_manager, config, logger)
+        pr_fetcher = PRFetcher(github_client, quota_manager, config, logger, state_manager)
         metrics_generator = MetricsGenerator(config, logger)
         pr_metrics = fetch_and_process_pr(
             pr, owner, repo, token, config, pr_fetcher, metrics_generator
@@ -1711,8 +1779,18 @@ def process_repository(
     logger.info("[%s] Starting processing", repo_ctx)
     logger.info("[%s] Date range: %s to %s", repo_ctx, start_date.isoformat(), end_date.isoformat())
 
+    # Check for previously failed PRs that need retry
+    failed_prs = state_manager.get_failed_prs(owner, repo)
+    if failed_prs:
+        logger.warning(
+            "[%s] Found %d previously failed PR(s) to retry: %s",
+            repo_ctx,
+            len(failed_prs),
+            failed_prs,
+        )
+
     # Create PRFetcher and MetricsGenerator instances for this repository
-    pr_fetcher = PRFetcher(github_client, quota_manager, config, logger)
+    pr_fetcher = PRFetcher(github_client, quota_manager, config, logger, state_manager)
     metrics_generator = MetricsGenerator(config, logger)
 
     # Check quota before starting any work
@@ -1746,6 +1824,28 @@ def process_repository(
 
     try:
         all_prs = pr_fetcher.fetch_pr_list(owner, repo, start_date, end_date)
+
+        # Add previously failed PRs to the front of the list for priority retry
+        if failed_prs:
+            failed_pr_objects = []
+            for pr_number in failed_prs:
+                try:
+                    pr = github_client.fetch_pr(owner, repo, pr_number)
+                    failed_pr_objects.append(pr)
+                    logger.info("[%s] Added failed PR #%d to retry list", repo_ctx, pr_number)
+                except GitHubAPIError as e:
+                    logger.error("[%s] Cannot fetch failed PR #%d: %s", repo_ctx, pr_number, e)
+
+            # Prepend failed PRs to all_prs (processed first)
+            # Remove duplicates if failed PR is also in date range
+            pr_numbers_in_list = {pr["number"] for pr in all_prs}
+            failed_pr_objects = [
+                pr for pr in failed_pr_objects if pr["number"] not in pr_numbers_in_list
+            ]
+            all_prs = failed_pr_objects + all_prs
+            logger.info(
+                "[%s] Prioritizing %d failed PR(s) for retry", repo_ctx, len(failed_pr_objects)
+            )
 
         if not all_prs:
             logger.info("[%s] No pull requests found in the specified date range", repo_ctx)
@@ -1926,6 +2026,14 @@ def main() -> int:
     logger.info("Configuration file: %s", args.config)
     logger.info("Logging to: %s", config.log_file)
     logger.debug("Arguments: %s", args)
+
+    # Check for failed PRs from previous runs
+    failed_count = state_manager.get_all_failed_prs_count()
+    if failed_count > 0:
+        logger.warning(
+            "Found %d previously failed PR(s) tracked across all repositories", failed_count
+        )
+        logger.warning("These PRs will be retried automatically during processing")
 
     # Validate argument combinations
     if args.init and not args.owner:
@@ -2339,7 +2447,7 @@ def main() -> int:
     else:
         # stdout mode - fetch all PRs then process (no state tracking)
         # Create PRFetcher and MetricsGenerator instances
-        pr_fetcher = PRFetcher(github_client, quota_manager, config, logger)
+        pr_fetcher = PRFetcher(github_client, quota_manager, config, logger, state_manager)
         metrics_generator = MetricsGenerator(config, logger)
 
         try:

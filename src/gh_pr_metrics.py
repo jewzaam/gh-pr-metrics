@@ -290,7 +290,13 @@ class StateManager:
         # Preserve existing fields (especially failed_prs)
         if repo_key not in state:
             state[repo_key] = {}
-        if not isinstance(state[repo_key], dict):
+        elif not isinstance(state[repo_key], dict):
+            if self._logger:
+                self._logger.warning(
+                    "Malformed state for %s: expected dict, got %s. Resetting to empty dict.",
+                    repo_key,
+                    type(state[repo_key]).__name__,
+                )
             state[repo_key] = {}
 
         state[repo_key]["timestamp"] = utc_timestamp.isoformat()
@@ -305,8 +311,13 @@ class StateManager:
 
         if repo_key not in state:
             state[repo_key] = {}
-
-        if not isinstance(state[repo_key], dict):
+        elif not isinstance(state[repo_key], dict):
+            if self._logger:
+                self._logger.warning(
+                    "Malformed state for %s: expected dict, got %s.",
+                    repo_key,
+                    type(state[repo_key]).__name__,
+                )
             state[repo_key] = {"timestamp": state[repo_key]}
 
         if "failed_prs" not in state[repo_key]:
@@ -411,7 +422,7 @@ class CSVManager:
     def __init__(self, logger=None):
         """Initialize CSV manager with logger."""
         self._logger = logger
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def get_fieldnames(self) -> List[str]:
         """Get CSV field names in order."""
@@ -442,34 +453,33 @@ class CSVManager:
             "total_line_changes",
         ]
 
+    @with_lock
     def read_csv(self, csv_file: str) -> Dict[int, Dict[str, Any]]:
         """
         Read existing CSV file and return dict keyed by PR number (thread-safe).
         Returns empty dict if file doesn't exist or can't be read.
         """
-        with self._lock:
-            if not os.path.exists(csv_file):
-                return {}
+        if not os.path.exists(csv_file):
+            return {}
 
-            try:
-                existing_data = {}
-                with open(csv_file, "r", newline="", encoding="utf-8") as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        # Key by PR number for O(1) lookups
-                        pr_number = int(row[PR_NUMBER_FIELD])
-                        existing_data[pr_number] = row
+        try:
+            existing_data = {}
+            with open(csv_file, "r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    # Key by PR number for O(1) lookups
+                    pr_number = int(row[PR_NUMBER_FIELD])
+                    existing_data[pr_number] = row
 
-                if self._logger:
-                    self._logger.debug(
-                        "Loaded %d existing PRs from %s", len(existing_data), csv_file
-                    )
-                return existing_data
-            except Exception as e:
-                if self._logger:
-                    self._logger.warning("Failed to read existing CSV %s: %s", csv_file, e)
-                return {}
+            if self._logger:
+                self._logger.debug("Loaded %d existing PRs from %s", len(existing_data), csv_file)
+            return existing_data
+        except Exception as e:
+            if self._logger:
+                self._logger.warning("Failed to read existing CSV %s: %s", csv_file, e)
+            return {}
 
+    @with_lock
     def write_csv(
         self,
         metrics: List[Dict[str, Any]],
@@ -485,76 +495,73 @@ class CSVManager:
 
         If force_write is True, write headers even if metrics list is empty.
         """
-        with self._lock:
-            if not metrics and not force_write:
-                if self._logger:
-                    self._logger.warning("No pull requests to output")
-                return
+        if not metrics and not force_write:
+            if self._logger:
+                self._logger.warning("No pull requests to output")
+            return
 
-            fieldnames = self.get_fieldnames()
+        fieldnames = self.get_fieldnames()
 
-            # Merge with existing data if requested
-            if merge_mode and output_file:
-                # Re-read inside lock to get latest data
-                if not os.path.exists(output_file):
-                    existing_data = {}
-                else:
-                    try:
-                        existing_data = {}
-                        with open(output_file, "r", newline="", encoding="utf-8") as f:
-                            reader = csv.DictReader(f)
-                            for row in reader:
-                                pr_number = int(row[PR_NUMBER_FIELD])
-                                existing_data[pr_number] = row
-                    except Exception:
-                        existing_data = {}
-
-                # Update existing data with new metrics
-                for metric in metrics:
-                    pr_number = metric[PR_NUMBER_FIELD]
-                    existing_data[pr_number] = metric
-
-                # Convert back to list
-                all_metrics = list(existing_data.values())
-                if self._logger:
-                    self._logger.debug(
-                        "Merged data: %d total PRs (%d new/updated)", len(all_metrics), len(metrics)
-                    )
+        # Merge with existing data if requested
+        if merge_mode and output_file:
+            # Re-read inside lock to get latest data
+            if not os.path.exists(output_file):
+                existing_data = {}
             else:
-                all_metrics = metrics
-
-            if output_file:
-                # Write to temp file first, then atomically rename
-                output_path = Path(output_file)
-                temp_fd, temp_path = tempfile.mkstemp(
-                    dir=(
-                        output_path.parent if output_path.parent.exists() else tempfile.gettempdir()
-                    ),
-                    prefix=".tmp_pr_metrics_",
-                    suffix=".csv",
-                )
-
                 try:
-                    with os.fdopen(temp_fd, "w", newline="", encoding="utf-8") as f:
-                        writer = csv.DictWriter(f, fieldnames=fieldnames)
-                        writer.writeheader()
-                        writer.writerows(all_metrics)
+                    existing_data = {}
+                    with open(output_file, "r", newline="", encoding="utf-8") as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            pr_number = int(row[PR_NUMBER_FIELD])
+                            existing_data[pr_number] = row
+                except Exception:
+                    existing_data = {}
 
-                    # Atomic rename
-                    os.rename(temp_path, output_file)
-                    if self._logger:
-                        self._logger.debug("Wrote %d PRs to %s", len(all_metrics), output_file)
-                except Exception as e:
-                    # Keep temp file for debugging
-                    if self._logger:
-                        self._logger.error(
-                            "Failed to write CSV output. Temp file retained at: %s", temp_path
-                        )
-                    raise e
-            else:
-                writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(all_metrics)
+            # Update existing data with new metrics
+            for metric in metrics:
+                pr_number = metric[PR_NUMBER_FIELD]
+                existing_data[pr_number] = metric
+
+            # Convert back to list
+            all_metrics = list(existing_data.values())
+            if self._logger:
+                self._logger.debug(
+                    "Merged data: %d total PRs (%d new/updated)", len(all_metrics), len(metrics)
+                )
+        else:
+            all_metrics = metrics
+
+        if output_file:
+            # Write to temp file first, then atomically rename
+            output_path = Path(output_file)
+            temp_fd, temp_path = tempfile.mkstemp(
+                dir=(output_path.parent if output_path.parent.exists() else tempfile.gettempdir()),
+                prefix=".tmp_pr_metrics_",
+                suffix=".csv",
+            )
+
+            try:
+                with os.fdopen(temp_fd, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(all_metrics)
+
+                # Atomic rename
+                os.rename(temp_path, output_file)
+                if self._logger:
+                    self._logger.debug("Wrote %d PRs to %s", len(all_metrics), output_file)
+            except Exception as e:
+                # Keep temp file for debugging
+                if self._logger:
+                    self._logger.error(
+                        "Failed to write CSV output. Temp file retained at: %s", temp_path
+                    )
+                raise e
+        else:
+            writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(all_metrics)
 
 
 def build_pr_json_data(pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, Any]:

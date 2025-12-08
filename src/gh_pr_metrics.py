@@ -491,11 +491,13 @@ def build_pr_json_data(pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, A
     try:
         comments = github_client.fetch_issue_comments(pr["comments_url"])
         for comment in comments:
+            # Handle cases where user field is None (deleted/ghost users)
+            user = comment.get("user") or {}
             issue_comments.append(
                 {
                     "id": comment.get("id"),
-                    "user": comment.get("user", {}).get("login"),
-                    "user_type": comment.get("user", {}).get("type"),
+                    "user": user.get("login"),
+                    "user_type": user.get("type"),
                     "body": comment.get("body", ""),
                     "created_at": comment.get("created_at"),
                     "updated_at": comment.get("updated_at"),
@@ -509,11 +511,13 @@ def build_pr_json_data(pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, A
     try:
         comments = github_client.fetch_review_comments(pr["review_comments_url"])
         for comment in comments:
+            # Handle cases where user field is None (deleted/ghost users)
+            user = comment.get("user") or {}
             review_comments.append(
                 {
                     "id": comment.get("id"),
-                    "user": comment.get("user", {}).get("login"),
-                    "user_type": comment.get("user", {}).get("type"),
+                    "user": user.get("login"),
+                    "user_type": user.get("type"),
                     "body": comment.get("body", ""),
                     "path": comment.get("path"),
                     "line": comment.get("line"),
@@ -529,11 +533,13 @@ def build_pr_json_data(pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, A
     try:
         review_list = github_client.fetch_reviews(owner, repo, pr_number)
         for review in review_list:
+            # Handle cases where user field is None (deleted/ghost users)
+            user = review.get("user") or {}
             reviews.append(
                 {
                     "id": review.get("id"),
-                    "user": review.get("user", {}).get("login"),
-                    "user_type": review.get("user", {}).get("type"),
+                    "user": user.get("login"),
+                    "user_type": user.get("type"),
                     "state": review.get("state"),
                     "body": review.get("body", ""),
                     "submitted_at": review.get("submitted_at"),
@@ -642,7 +648,8 @@ def get_ready_for_review_time(
         # Check events to see if it was ever a draft
         try:
             events = github_client.fetch_timeline_events(owner, repo, pr["number"])
-            ready_events = [e for e in events if e.get("event") == "ready_for_review"]
+            # Filter out None entries (deleted/removed events from GitHub API)
+            ready_events = [e for e in events if e and e.get("event") == "ready_for_review"]
             if ready_events:
                 # Use the latest ready_for_review event
                 return ready_events[-1]["created_at"]
@@ -744,8 +751,11 @@ def count_comments(
         comments = github_client.fetch_issue_comments(comments_url)
         for comment in comments:
             total_comments += 1
-            if comment.get("user", {}).get("type") == "Bot":
-                login = comment["user"]["login"]
+            user = comment.get("user") or {}
+            if user.get("type") == "Bot":
+                login = user.get("login")
+                if not login:
+                    continue  # Skip if user login is not available
                 comment_body = comment.get("body", "")
 
                 is_ai = config.is_ai_bot(login, comment_body)
@@ -772,8 +782,11 @@ def count_comments(
         review_comments = github_client.fetch_review_comments(review_comments_url)
         for comment in review_comments:
             total_comments += 1
-            if comment.get("user", {}).get("type") == "Bot":
-                login = comment["user"]["login"]
+            user = comment.get("user") or {}
+            if user.get("type") == "Bot":
+                login = user.get("login")
+                if not login:
+                    continue  # Skip if user login is not available
                 comment_body = comment.get("body", "")
 
                 is_ai = config.is_ai_bot(login, comment_body)
@@ -806,9 +819,12 @@ def count_comments(
     for review in reviews:
         # Only count reviews with body text as comments
         review_body = review.get("body", "")
-        if review_body and review.get("user", {}).get("type") == "Bot":
+        user = review.get("user") or {}
+        if review_body and user.get("type") == "Bot":
             total_comments += 1
-            login = review["user"]["login"]
+            login = user.get("login")
+            if not login:
+                continue  # Skip if user login is not available
 
             is_ai = config.is_ai_bot(login, review_body)
             logger.debug(

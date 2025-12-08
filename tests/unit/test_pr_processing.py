@@ -93,6 +93,13 @@ class TestReadyForReviewTime:
 
     def test_ready_for_review_never_draft(self, requests_mock, default_config):
         """Test PR that was never a draft."""
+        # Initialize github_client
+        from github_api import GitHubClient
+
+        gh_pr_metrics.github_client = GitHubClient(
+            "fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
+
         pr = {
             "number": 1,
             "draft": False,
@@ -108,6 +115,13 @@ class TestReadyForReviewTime:
 
     def test_ready_for_review_with_event(self, requests_mock, default_config):
         """Test PR that was converted from draft."""
+        # Initialize github_client
+        from github_api import GitHubClient
+
+        gh_pr_metrics.github_client = GitHubClient(
+            "fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
+
         pr = {
             "number": 1,
             "draft": False,
@@ -124,8 +138,97 @@ class TestReadyForReviewTime:
         result = gh_pr_metrics.get_ready_for_review_time(pr, "owner", "repo", None)
         assert result == "2024-01-02T00:00:00Z"
 
+    def test_ready_for_review_with_none_entries(self, requests_mock, default_config):
+        """Test PR timeline events containing None entries (deleted/removed events)."""
+        # Initialize github_client
+        from github_api import GitHubClient
+
+        gh_pr_metrics.github_client = GitHubClient(
+            "fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
+
+        pr = {
+            "number": 1,
+            "draft": False,
+            "created_at": "2024-01-01T00:00:00Z",
+        }
+
+        # Mock the events API to return a mix of None and valid events
+        events_url = "https://api.github.com/repos/owner/repo/issues/1/events"
+        requests_mock.get(
+            events_url,
+            json=[
+                None,
+                {"event": "labeled", "created_at": "2024-01-01T12:00:00Z"},
+                None,
+                {"event": "ready_for_review", "created_at": "2024-01-02T00:00:00Z"},
+                None,
+            ],
+        )
+
+        result = gh_pr_metrics.get_ready_for_review_time(pr, "owner", "repo", None)
+        assert result == "2024-01-02T00:00:00Z"
+
+    def test_ready_for_review_ghost_user_in_reviews(self, requests_mock, default_config):
+        """Test PR with ghost user (deleted account) in reviews doesn't crash."""
+        pr = {
+            "number": 1,
+            "title": "Test PR",
+            "user": {"login": "testuser", "type": "User"},
+            "draft": False,
+            "state": "open",
+            "merged_at": None,
+            "closed_at": None,
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-02T00:00:00Z",
+            "html_url": "https://github.com/owner/repo/pull/1",
+            "comments_url": "https://api.github.com/repos/owner/repo/issues/1/comments",
+            "review_comments_url": "https://api.github.com/repos/owner/repo/pulls/1/comments",
+        }
+
+        # Mock API responses with ghost user (null user)
+        events_url = "https://api.github.com/repos/owner/repo/issues/1/events"
+        reviews_url = "https://api.github.com/repos/owner/repo/pulls/1/reviews"
+
+        requests_mock.get(events_url, json=[])
+        requests_mock.get(pr["comments_url"], json=[])
+        requests_mock.get(pr["review_comments_url"], json=[])
+        requests_mock.get(
+            reviews_url,
+            json=[
+                {
+                    "id": 123456,
+                    "user": {"login": "realuser", "type": "User"},
+                    "state": "APPROVED",
+                    "body": "LGTM",
+                    "submitted_at": "2024-01-02T00:00:00Z",
+                },
+                {
+                    "id": 123457,
+                    "user": None,  # Ghost user (deleted account)
+                    "state": "APPROVED",
+                    "body": "",
+                    "submitted_at": "2024-01-02T05:00:00Z",
+                },
+            ],
+        )
+
+        # Should not crash
+        result = gh_pr_metrics.process_pr(pr, {}, "owner", "repo", None, default_config)
+
+        # Verify basic fields are present
+        assert result["pr_number"] == 1
+        assert result["status"] == "open"
+
     def test_ready_for_review_api_error(self, requests_mock, default_config):
         """Test handling API errors when fetching events."""
+        # Initialize github_client
+        from github_api import GitHubClient
+
+        gh_pr_metrics.github_client = GitHubClient(
+            "fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
+
         pr = {
             "number": 1,
             "draft": False,

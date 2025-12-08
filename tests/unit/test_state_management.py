@@ -454,3 +454,26 @@ class TestStateManagement:
         with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
             count = gh_pr_metrics.state_manager.get_all_failed_prs_count()
             assert count == 5  # 2 from repo1 + 3 from repo2 + 0 from repo3
+
+    def test_mark_pr_failed_concurrent_updates(self, tmp_path):
+        """Test that concurrent mark_pr_failed calls don't lose data due to race conditions."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        state_file = tmp_path / "state.yaml"
+
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            # Simulate 10 threads marking different PRs as failed concurrently
+            pr_numbers = list(range(1, 21))
+
+            def mark_failed(pr_num):
+                gh_pr_metrics.state_manager.mark_pr_failed("owner", "repo", pr_num)
+
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = [executor.submit(mark_failed, pr_num) for pr_num in pr_numbers]
+                for future in as_completed(futures):
+                    future.result()  # Wait for completion
+
+            # Verify all 20 PRs were recorded (no lost updates)
+            failed_prs = gh_pr_metrics.state_manager.get_failed_prs("owner", "repo")
+            assert len(failed_prs) == 20
+            assert set(failed_prs) == set(pr_numbers)

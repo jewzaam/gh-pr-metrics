@@ -173,20 +173,33 @@ def load_config(config_path: str) -> Config:
         raise ValueError(f"Missing required configuration key: {e}")
 
 
+def with_lock(func):
+    """Decorator to synchronize access to StateManager methods using self._lock."""
+
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return func(self, *args, **kwargs)
+
+    return wrapper
+
+
 class StateManager:
     """
     Manages state file for tracking repository processing progress.
 
     State file stores last update timestamp and CSV file path per repository.
+    Thread-safe via @with_lock decorator on all public methods.
     """
 
     def __init__(self, state_file_path: Path = None, logger=None):
         """Initialize state manager with path to state file and logger."""
         self._state_file = state_file_path or STATE_FILE
         self._logger = logger
+        self._lock = threading.RLock()  # Reentrant lock for nested lock acquisitions
 
+    @with_lock
     def load(self) -> Dict[str, Any]:
-        """Load state file containing last update dates per repo."""
+        """Load state file containing last update dates per repo. Thread-safe."""
         if not self._state_file.exists():
             return {}
 
@@ -199,8 +212,9 @@ class StateManager:
                 self._logger.warning("Failed to load state file %s: %s", self._state_file, e)
             return {}
 
+    @with_lock
     def save(self, state: Dict[str, Any]) -> None:
-        """Save state file with last update dates per repo."""
+        """Save state file with last update dates per repo. Thread-safe."""
         try:
             with open(self._state_file, "w", encoding="utf-8") as f:
                 yaml.safe_dump(state, f, default_flow_style=False, sort_keys=True)
@@ -219,11 +233,12 @@ class StateManager:
         """
         return f"https://github.com/{owner}/{repo}"
 
+    @with_lock
     def get_repo_state(self, owner: str, repo: str) -> Optional[Dict[str, Any]]:
         """
         Get state for a repository (timestamp and csv_file).
         Returns dict with 'timestamp' and 'csv_file' keys, or None if not found.
-        Raises ValueError if state is malformed.
+        Raises ValueError if state is malformed. Thread-safe.
         """
         state = self.load()
         repo_key = self.get_repo_remote_url(owner, repo)
@@ -264,17 +279,27 @@ class StateManager:
 
         return {"timestamp": timestamp, "csv_file": csv_file}
 
+    @with_lock
     def update_repo(self, owner: str, repo: str, timestamp: datetime, csv_file: str) -> None:
-        """Update state file with new last update date and csv file for a repository."""
+        """Update state file with new last update date and csv file. Thread-safe."""
         state = self.load()
         repo_key = self.get_repo_remote_url(owner, repo)
         # Store as UTC timestamp without timezone component
         utc_timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
-        state[repo_key] = {"timestamp": utc_timestamp.isoformat(), "csv_file": csv_file}
+
+        # Preserve existing fields (especially failed_prs)
+        if repo_key not in state:
+            state[repo_key] = {}
+        if not isinstance(state[repo_key], dict):
+            state[repo_key] = {}
+
+        state[repo_key]["timestamp"] = utc_timestamp.isoformat()
+        state[repo_key]["csv_file"] = csv_file
         self.save(state)
 
+    @with_lock
     def mark_pr_failed(self, owner: str, repo: str, pr_number: int) -> None:
-        """Mark a PR as failed. Will be retried on next run."""
+        """Mark a PR as failed. Will be retried on next run. Thread-safe."""
         state = self.load()
         repo_key = self.get_repo_remote_url(owner, repo)
 
@@ -294,8 +319,9 @@ class StateManager:
         if self._logger:
             self._logger.warning("Marked PR #%d as failed for %s/%s", pr_number, owner, repo)
 
+    @with_lock
     def mark_pr_succeeded(self, owner: str, repo: str, pr_number: int) -> None:
-        """Remove a PR from failed list after successful fetch."""
+        """Remove a PR from failed list after successful fetch. Thread-safe."""
         state = self.load()
         repo_key = self.get_repo_remote_url(owner, repo)
 
@@ -310,8 +336,9 @@ class StateManager:
                         "Removed PR #%d from failed list for %s/%s", pr_number, owner, repo
                     )
 
+    @with_lock
     def get_failed_prs(self, owner: str, repo: str) -> List[int]:
-        """Get list of failed PR numbers for a repository."""
+        """Get list of failed PR numbers for a repository. Thread-safe."""
         state = self.load()
         repo_key = self.get_repo_remote_url(owner, repo)
 
@@ -319,8 +346,9 @@ class StateManager:
             return state[repo_key].get("failed_prs", [])
         return []
 
+    @with_lock
     def get_all_failed_prs_count(self) -> int:
-        """Get total count of failed PRs across all repositories."""
+        """Get total count of failed PRs across all repositories. Thread-safe."""
         state = self.load()
         total = 0
         for entry in state.values():
@@ -328,10 +356,12 @@ class StateManager:
                 total += len(entry.get("failed_prs", []))
         return total
 
+    @with_lock
     def get_all_tracked_repos(self) -> List[Dict[str, Any]]:
         """
         Get all tracked repositories from state file.
         Returns list of dicts with 'url', 'owner', 'repo', 'timestamp', 'csv_file'.
+        Thread-safe.
         """
         state = self.load()
         repos = []

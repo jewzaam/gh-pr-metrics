@@ -88,10 +88,7 @@ ai_bots:
       match_any: true
 workers: 8
 log_file: "test.log"
-default_days_back: 90
-quota:
-  reserve: 200
-  min_buffer: 100
+raw_data_dir: "data/json"
 """
         )
 
@@ -99,9 +96,7 @@ quota:
 
         assert config.workers == 8
         assert config.log_file == "test.log"
-        assert config.default_days_back == 90
-        assert config.quota_reserve == 200
-        assert config.quota_min_buffer == 100
+        assert config.raw_data_dir == "data/json"
         assert len(config.always_ai_bots) == 1
         assert len(config.conditional_bots) == 1
 
@@ -116,9 +111,7 @@ class TestConfigDefaults:
         # Should use defaults
         assert config.workers == 4
         assert config.log_file == "gh-pr-metrics.log"
-        assert config.default_days_back == 365
-        assert config.quota_reserve == 100
-        assert config.quota_min_buffer == 50
+        assert config.raw_data_dir  # Verify raw_data_dir is set (value may be test-isolated)
         assert config.always_ai_bots == []
         assert config.conditional_bots == []
 

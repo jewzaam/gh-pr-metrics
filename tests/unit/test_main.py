@@ -31,7 +31,15 @@ class TestMain:
         with mock.patch.object(
             sys,
             "argv",
-            ["gh-pr-metrics", "--owner", "testowner", "--repo", "testrepo"],
+            [
+                "gh-pr-metrics",
+                "--owner",
+                "testowner",
+                "--repo",
+                "testrepo",
+                "--start",
+                "2024-01-01",
+            ],
         ):
             with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
                 result = gh_pr_metrics.main()

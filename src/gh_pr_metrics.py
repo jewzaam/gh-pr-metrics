@@ -488,6 +488,7 @@ def build_pr_json_data(pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, A
 
     # Fetch issue comments
     issue_comments = []
+    fetch_errors = []
     try:
         comments = github_client.fetch_issue_comments(pr["comments_url"])
         for comment in comments:
@@ -504,7 +505,8 @@ def build_pr_json_data(pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, A
                 }
             )
     except GitHubAPIError as e:
-        logger.debug("Failed to fetch issue comments for PR #%d: %s", pr_number, e)
+        logger.warning("Failed to fetch issue comments for PR #%d: %s", pr_number, e)
+        fetch_errors.append(f"issue_comments: {e}")
 
     # Fetch review comments
     review_comments = []
@@ -526,7 +528,8 @@ def build_pr_json_data(pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, A
                 }
             )
     except GitHubAPIError as e:
-        logger.debug("Failed to fetch review comments for PR #%d: %s", pr_number, e)
+        logger.warning("Failed to fetch review comments for PR #%d: %s", pr_number, e)
+        fetch_errors.append(f"review_comments: {e}")
 
     # Fetch reviews
     reviews = []
@@ -546,7 +549,8 @@ def build_pr_json_data(pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, A
                 }
             )
     except GitHubAPIError as e:
-        logger.debug("Failed to fetch reviews for PR #%d: %s", pr_number, e)
+        logger.warning("Failed to fetch reviews for PR #%d: %s", pr_number, e)
+        fetch_errors.append(f"reviews: {e}")
 
     # Build complete PR data
     return {
@@ -593,6 +597,394 @@ def write_pr_json(raw_data_dir: str, owner: str, repo: str, pr_data: Dict[str, A
         logger.debug("Wrote PR #%d JSON to %s", pr_number, json_file)
     except Exception as e:
         logger.warning("Failed to write PR #%d JSON: %s", pr_number, e)
+
+
+# ============================================================================
+# PRFetcher Class - Encapsulates PR data fetching and JSON caching
+# ============================================================================
+
+
+class PRFetcher:
+    """
+    Handles fetching PR data from GitHub API and caching as JSON.
+
+    Encapsulates all fetch-related operations:
+    - Fetching PR lists from GitHub
+    - Fetching PR details (comments, reviews, timeline)
+    - Writing PR data to JSON cache files
+    """
+
+    def __init__(
+        self,
+        github_client: GitHubClient,
+        quota_manager: QuotaManager,
+        config: Config,
+        logger: logging.Logger,
+    ):
+        """
+        Initialize PRFetcher.
+
+        Args:
+            github_client: GitHub API client
+            quota_manager: API quota manager
+            config: Application configuration
+            logger: Logger instance
+        """
+        self.github_client = github_client
+        self.quota_manager = quota_manager
+        self.config = config
+        self.logger = logger
+
+    def fetch_pr_list(
+        self, owner: str, repo: str, start_date: datetime, end_date: datetime
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch list of PRs in date range.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            start_date: Start date for PR query
+            end_date: End date for PR query
+
+        Returns:
+            List of PR dictionaries (sorted oldest-first by updated_at)
+        """
+        return self.github_client.fetch_all_prs(owner, repo, start_date, end_date)
+
+    def fetch_pr_details(self, pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, Any]:
+        """
+        Fetch complete PR details including comments, reviews, and timeline.
+
+        This wraps the build_pr_json_data() function logic.
+
+        Args:
+            pr: Base PR object from GitHub API
+            owner: Repository owner
+            repo: Repository name
+
+        Returns:
+            Complete PR data dictionary ready for JSON serialization
+        """
+        pr_number = pr["number"]
+
+        # Fetch issue comments
+        issue_comments = []
+        fetch_errors = []
+        try:
+            comments = self.github_client.fetch_issue_comments(pr["comments_url"])
+            for comment in comments:
+                # Handle cases where user field is None (deleted/ghost users)
+                user = comment.get("user") or {}
+                issue_comments.append(
+                    {
+                        "id": comment.get("id"),
+                        "user": user.get("login"),
+                        "user_type": user.get("type"),
+                        "body": comment.get("body", ""),
+                        "created_at": comment.get("created_at"),
+                        "updated_at": comment.get("updated_at"),
+                    }
+                )
+        except GitHubAPIError as e:
+            self.logger.warning("Failed to fetch issue comments for PR #%d: %s", pr_number, e)
+            fetch_errors.append(f"issue_comments: {e}")
+
+        # Fetch review comments
+        review_comments = []
+        try:
+            comments = self.github_client.fetch_review_comments(pr["review_comments_url"])
+            for comment in comments:
+                # Handle cases where user field is None (deleted/ghost users)
+                user = comment.get("user") or {}
+                review_comments.append(
+                    {
+                        "id": comment.get("id"),
+                        "user": user.get("login"),
+                        "user_type": user.get("type"),
+                        "body": comment.get("body", ""),
+                        "path": comment.get("path"),
+                        "line": comment.get("line"),
+                        "created_at": comment.get("created_at"),
+                        "updated_at": comment.get("updated_at"),
+                    }
+                )
+        except GitHubAPIError as e:
+            self.logger.warning("Failed to fetch review comments for PR #%d: %s", pr_number, e)
+            fetch_errors.append(f"review_comments: {e}")
+
+        # Fetch reviews
+        reviews = []
+        try:
+            review_list = self.github_client.fetch_reviews(owner, repo, pr_number)
+            for review in review_list:
+                # Handle cases where user field is None (deleted/ghost users)
+                user = review.get("user") or {}
+                reviews.append(
+                    {
+                        "id": review.get("id"),
+                        "user": user.get("login"),
+                        "user_type": user.get("type"),
+                        "state": review.get("state"),
+                        "body": review.get("body", ""),
+                        "submitted_at": review.get("submitted_at"),
+                    }
+                )
+        except GitHubAPIError as e:
+            self.logger.warning("Failed to fetch reviews for PR #%d: %s", pr_number, e)
+            fetch_errors.append(f"reviews: {e}")
+
+        # Build complete PR data
+        # Handle cases where user field is None (deleted/ghost users)
+        pr_user = pr.get("user") or {}
+        pr_data = {
+            "pr_number": pr_number,
+            "title": pr["title"],
+            "author": pr_user.get("login"),
+            "author_type": pr_user.get("type"),
+            "state": pr["state"],
+            "created_at": pr["created_at"],
+            "updated_at": pr["updated_at"],
+            "merged_at": pr.get("merged_at"),
+            "closed_at": pr.get("closed_at"),
+            "draft": pr.get("draft", False),
+            "url": pr["html_url"],
+            "additions": pr.get("additions", 0),
+            "deletions": pr.get("deletions", 0),
+            "changed_files": pr.get("changed_files", 0),
+            "issue_comments": issue_comments,
+            "review_comments": review_comments,
+            "reviews": reviews,
+        }
+
+        # Include fetch errors if any occurred
+        if fetch_errors:
+            pr_data["fetch_errors"] = fetch_errors
+
+        return pr_data
+
+    def write_pr_json(self, owner: str, repo: str, pr_data: Dict[str, Any]) -> None:
+        """
+        Write PR data to JSON cache file.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            pr_data: Complete PR data dictionary
+        """
+        # Provider-aware path: raw_data_dir/github.com/owner/repo/
+        output_dir = Path(self.config.raw_data_dir) / "github.com" / owner / repo
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        pr_number = pr_data["pr_number"]
+        json_file = output_dir / f"{pr_number}.json"
+
+        try:
+            with open(json_file, "w", encoding="utf-8") as f:
+                json.dump(pr_data, f, indent=2, ensure_ascii=False)
+            self.logger.debug("Wrote PR #%d JSON to %s", pr_number, json_file)
+        except Exception as e:
+            self.logger.warning("Failed to write PR #%d JSON: %s", pr_number, e)
+
+    def fetch_and_cache_pr(self, pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, Any]:
+        """
+        Fetch PR details and cache to JSON file.
+
+        This is the main entry point for fetching a single PR.
+
+        Args:
+            pr: Base PR object from GitHub API
+            owner: Repository owner
+            repo: Repository name
+
+        Returns:
+            Complete PR data dictionary (same data written to JSON)
+        """
+        pr_data = self.fetch_pr_details(pr, owner, repo)
+        self.write_pr_json(owner, repo, pr_data)
+        return pr_data
+
+
+# ============================================================================
+# MetricsGenerator Class - Encapsulates metrics calculation and CSV generation
+# ============================================================================
+
+
+class MetricsGenerator:
+    """
+    Handles generating CSV metrics from PR JSON data.
+
+    Encapsulates all metrics-related operations:
+    - Reading PR JSON from cache
+    - Calculating metrics from PR data
+    - Converting PR data to CSV rows
+    """
+
+    def __init__(self, config: Config, logger: logging.Logger):
+        """
+        Initialize MetricsGenerator.
+
+        Args:
+            config: Application configuration
+            logger: Logger instance
+        """
+        self.config = config
+        self.logger = logger
+
+    def read_pr_json(self, owner: str, repo: str, pr_number: int) -> Optional[Dict[str, Any]]:
+        """
+        Read PR JSON from cache file.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            pr_number: PR number
+
+        Returns:
+            PR data dictionary, or None if file doesn't exist or can't be read
+        """
+        # Provider-aware path: raw_data_dir/github.com/owner/repo/pr_number.json
+        json_file = (
+            Path(self.config.raw_data_dir) / "github.com" / owner / repo / f"{pr_number}.json"
+        )
+
+        if not json_file.exists():
+            self.logger.warning("PR #%d JSON file not found: %s", pr_number, json_file)
+            return None
+
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            self.logger.warning("Failed to read PR #%d JSON: %s", pr_number, e)
+            return None
+
+    def calculate_metrics(
+        self,
+        pr: Dict[str, Any],
+        pr_json_data: Dict[str, Any],
+        owner: str,
+        repo: str,
+        token: Optional[str],
+    ) -> Dict[str, Any]:
+        """
+        Calculate metrics from PR JSON data.
+
+        This wraps the process_pr() function logic.
+
+        Args:
+            pr: Base PR object
+            pr_json_data: Complete PR data (includes comments, reviews)
+            owner: Repository owner
+            repo: Repository name
+            token: GitHub token
+
+        Returns:
+            Metrics dictionary for CSV
+        """
+        pr_number = pr["number"]
+        self.logger.debug("Processing PR #%d: %s", pr_number, pr["title"])
+
+        errors = []
+        metrics: Dict[str, Any] = {
+            PR_NUMBER_FIELD: pr_number,
+            "title": pr["title"],
+            "author": pr["user"]["login"] if pr.get("user") else "",
+            "created_at": pr["created_at"],
+            "url": pr["html_url"],
+        }
+
+        # Ready for review time
+        try:
+            metrics["ready_for_review_at"] = get_ready_for_review_time(pr, owner, repo, token)
+        except Exception as e:
+            self.logger.debug("Error getting ready time for PR #%d: %s", pr_number, e)
+            metrics["ready_for_review_at"] = pr["created_at"]
+            errors.append(f"ready_time: {e}")
+
+        # Use reviews from pr_json_data
+        reviews = pr_json_data.get("reviews", [])
+
+        # Comment counts (including review bodies) - use data from pr_json_data
+        try:
+            total_comments, non_ai_bot_comments, ai_bot_comments, non_ai_bot_names, ai_bot_names = (
+                count_comments_from_json(pr_json_data, self.config)
+            )
+            metrics["total_comment_count"] = total_comments
+            metrics["non_ai_bot_comment_count"] = non_ai_bot_comments
+            metrics["ai_bot_comment_count"] = ai_bot_comments
+            metrics["non_ai_bot_login_names"] = non_ai_bot_names
+            metrics["ai_bot_login_names"] = ai_bot_names
+        except Exception as e:
+            self.logger.debug("Error counting comments for PR #%d: %s", pr_number, e)
+            metrics["total_comment_count"] = 0
+            metrics["non_ai_bot_comment_count"] = 0
+            metrics["ai_bot_comment_count"] = 0
+            metrics["non_ai_bot_login_names"] = ""
+            metrics["ai_bot_login_names"] = ""
+            errors.append(f"comments: {e}")
+
+        # Review metrics - use reviews from pr_json_data
+        try:
+            changes_requested, unique_requesters, approvals = get_review_metrics_from_json(reviews)
+            metrics["changes_requested_count"] = changes_requested
+            metrics["unique_change_requesters"] = unique_requesters
+            metrics["approval_count"] = approvals
+        except Exception as e:
+            self.logger.debug("Error getting reviews for PR #%d: %s", pr_number, e)
+            metrics["changes_requested_count"] = 0
+            metrics["unique_change_requesters"] = 0
+            metrics["approval_count"] = 0
+            errors.append(f"reviews: {e}")
+
+        # Status
+        metrics["status"] = determine_pr_status(pr)
+
+        # Merged and closed timestamps
+        metrics["merged_at"] = pr.get("merged_at") or ""
+        metrics["closed_at"] = pr.get("closed_at") or ""
+
+        # Calculate derived time metrics
+        try:
+            created_at = date_parser.parse(pr["created_at"])
+            ready_at = date_parser.parse(metrics["ready_for_review_at"])
+
+            # Determine end time (merged, closed, or now)
+            if metrics["merged_at"]:
+                end_time = date_parser.parse(metrics["merged_at"])
+            elif metrics["closed_at"]:
+                end_time = date_parser.parse(metrics["closed_at"])
+            else:
+                end_time = datetime.now(timezone.utc)
+
+            # days_open: created → end
+            days_open = (end_time - created_at).total_seconds() / 86400
+            metrics["days_open"] = round(days_open, 2)
+
+            # days_in_review: ready_for_review → end
+            days_in_review = (end_time - ready_at).total_seconds() / 86400
+            metrics["days_in_review"] = round(days_in_review, 2)
+
+        except Exception as e:
+            self.logger.debug("Error calculating time metrics for PR #%d: %s", pr_number, e)
+            metrics["days_open"] = ""
+            metrics["days_in_review"] = ""
+            errors.append(f"time_metrics: {e}")
+
+        # Complexity metrics
+        metrics["lines_added"] = pr.get("additions", 0)
+        metrics["lines_deleted"] = pr.get("deletions", 0)
+        metrics["files_changed"] = pr.get("changed_files", 0)
+        metrics["total_line_changes"] = metrics["lines_added"] + metrics["lines_deleted"]
+
+        # Include fetch errors from PR JSON data if present
+        if "fetch_errors" in pr_json_data:
+            errors.extend(pr_json_data["fetch_errors"])
+
+        # Errors
+        metrics["errors"] = "; ".join(errors) if errors else ""
+
+        return metrics
 
 
 class LoggingManager:
@@ -1058,6 +1450,10 @@ def process_pr(
     metrics["files_changed"] = pr.get("changed_files", 0)
     metrics["total_line_changes"] = metrics["lines_added"] + metrics["lines_deleted"]
 
+    # Include fetch errors from PR JSON data if present
+    if "fetch_errors" in pr_json_data:
+        errors.extend(pr_json_data["fetch_errors"])
+
     # Errors
     metrics["errors"] = "; ".join(errors) if errors else ""
 
@@ -1200,16 +1596,31 @@ def show_update_all_progress_summary(
 
 
 def fetch_and_process_pr(
-    pr: Dict[str, Any], owner: str, repo: str, token: Optional[str], config: Config
+    pr: Dict[str, Any],
+    owner: str,
+    repo: str,
+    token: Optional[str],
+    config: Config,
+    pr_fetcher: PRFetcher,
+    metrics_generator: MetricsGenerator,
 ) -> Dict[str, Any]:
     """
     Fetch complete PR data, process metrics, and write JSON.
 
-    Returns metrics dict for CSV.
+    Args:
+        pr: Base PR object from GitHub API
+        owner: Repository owner
+        repo: Repository name
+        token: GitHub API token
+        config: Application configuration
+        pr_fetcher: PRFetcher instance for fetching and caching PR data
+        metrics_generator: MetricsGenerator instance for calculating metrics
+
+    Returns:
+        Metrics dict for CSV
     """
-    pr_json_data = build_pr_json_data(pr, owner, repo)
-    pr_metrics = process_pr(pr, pr_json_data, owner, repo, token, config)
-    write_pr_json(config.raw_data_dir, owner, repo, pr_json_data)
+    pr_json_data = pr_fetcher.fetch_and_cache_pr(pr, owner, repo)
+    pr_metrics = metrics_generator.calculate_metrics(pr, pr_json_data, owner, repo, token)
     return pr_metrics
 
 
@@ -1236,7 +1647,12 @@ def update_single_pr(
 
     logger.info("Processing PR #%d", pr_number)
     try:
-        pr_metrics = fetch_and_process_pr(pr, owner, repo, token, config)
+        # Create PRFetcher and MetricsGenerator instances
+        pr_fetcher = PRFetcher(github_client, quota_manager, config, logger)
+        metrics_generator = MetricsGenerator(config, logger)
+        pr_metrics = fetch_and_process_pr(
+            pr, owner, repo, token, config, pr_fetcher, metrics_generator
+        )
     except Exception as e:
         logger.error("Failed to process PR #%d: %s", pr_number, e)
         return 1
@@ -1295,6 +1711,10 @@ def process_repository(
     logger.info("[%s] Starting processing", repo_ctx)
     logger.info("[%s] Date range: %s to %s", repo_ctx, start_date.isoformat(), end_date.isoformat())
 
+    # Create PRFetcher and MetricsGenerator instances for this repository
+    pr_fetcher = PRFetcher(github_client, quota_manager, config, logger)
+    metrics_generator = MetricsGenerator(config, logger)
+
     # Check quota before starting any work
     max_prs_can_process = quota_manager.calculate_max_prs()
     if max_prs_can_process == 0:
@@ -1325,7 +1745,7 @@ def process_repository(
     chunks_completed = 0  # Initialize early for error handlers
 
     try:
-        all_prs = github_client.fetch_all_prs(owner, repo, start_date, end_date)
+        all_prs = pr_fetcher.fetch_pr_list(owner, repo, start_date, end_date)
 
         if not all_prs:
             logger.info("[%s] No pull requests found in the specified date range", repo_ctx)
@@ -1400,7 +1820,16 @@ def process_repository(
             # Process PRs in parallel - each writes to CSV immediately (thread-safe)
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 future_to_pr = {
-                    executor.submit(fetch_and_process_pr, pr, owner, repo, token, config): pr
+                    executor.submit(
+                        fetch_and_process_pr,
+                        pr,
+                        owner,
+                        repo,
+                        token,
+                        config,
+                        pr_fetcher,
+                        metrics_generator,
+                    ): pr
                     for pr in prs_chunk
                 }
 
@@ -1909,8 +2338,12 @@ def main() -> int:
         return exit_code
     else:
         # stdout mode - fetch all PRs then process (no state tracking)
+        # Create PRFetcher and MetricsGenerator instances
+        pr_fetcher = PRFetcher(github_client, quota_manager, config, logger)
+        metrics_generator = MetricsGenerator(config, logger)
+
         try:
-            all_prs = github_client.fetch_all_prs(owner, repo, start_date, end_date)
+            all_prs = pr_fetcher.fetch_pr_list(owner, repo, start_date, end_date)
 
             if not all_prs:
                 logger.warning("No pull requests found in the specified date range")
@@ -1925,7 +2358,16 @@ def main() -> int:
             # Process PRs in parallel
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 future_to_pr = {
-                    executor.submit(fetch_and_process_pr, pr, owner, repo, token, config): pr
+                    executor.submit(
+                        fetch_and_process_pr,
+                        pr,
+                        owner,
+                        repo,
+                        token,
+                        config,
+                        pr_fetcher,
+                        metrics_generator,
+                    ): pr
                     for pr in all_prs
                 }
 

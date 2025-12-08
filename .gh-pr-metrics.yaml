@@ -37,14 +37,3 @@ output_pattern: "data/{owner}_{repo}.csv"
 # Log file location (config only, not available via CLI)
 log_file: "gh-pr-metrics.log"
 
-# Default lookback period in days when --start not specified (config only)
-default_days_back: 365
-
-# GitHub API quota management (config only)
-quota:
-  # Reserve quota - stop processing if remaining quota drops below this
-  reserve: 100
-  
-  # Minimum buffer for rate limit decisions
-  min_buffer: 50
-

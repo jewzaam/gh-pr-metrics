@@ -2,6 +2,7 @@
 """Tests for REST API pagination."""
 
 import gh_pr_metrics
+from github_api import GitHubClient
 
 
 class TestPagination:
@@ -36,9 +37,7 @@ class TestPagination:
             },
         )
 
-        client = gh_pr_metrics.GitHubClient(
-            "fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
-        )
+        client = GitHubClient("fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger)
         comments = client.fetch_issue_comments(
             "https://api.github.com/repos/test/test/issues/1/comments"
         )
@@ -78,9 +77,7 @@ class TestPagination:
             },
         )
 
-        client = gh_pr_metrics.GitHubClient(
-            "fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
-        )
+        client = GitHubClient("fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger)
         comments = client.fetch_review_comments(
             "https://api.github.com/repos/test/test/pulls/1/comments"
         )
@@ -122,9 +119,7 @@ class TestPagination:
             },
         )
 
-        client = gh_pr_metrics.GitHubClient(
-            "fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
-        )
+        client = GitHubClient("fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger)
         reviews = client.fetch_reviews("test", "test", 1)
 
         assert len(reviews) == 125
@@ -158,9 +153,7 @@ class TestPagination:
             },
         )
 
-        client = gh_pr_metrics.GitHubClient(
-            "fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
-        )
+        client = GitHubClient("fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger)
         events = client.fetch_timeline_events("test", "test", 1)
 
         assert len(events) == 110
@@ -179,9 +172,7 @@ class TestPagination:
             },
         )
 
-        client = gh_pr_metrics.GitHubClient(
-            "fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
-        )
+        client = GitHubClient("fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger)
         comments = client.fetch_issue_comments(
             "https://api.github.com/repos/test/test/issues/1/comments"
         )

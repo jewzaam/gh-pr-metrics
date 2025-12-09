@@ -9,35 +9,69 @@ requests in a GitHub repository within a specified time range.
 """
 
 import argparse
-import csv
 import json
 import logging
 import os
 import subprocess
 import sys
-import tempfile
-import threading
-import yaml
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-
-try:
-    import argcomplete
-
-    ARGCOMPLETE_AVAILABLE = True
-except ImportError:
-    ARGCOMPLETE_AVAILABLE = False
 
 from dateutil import parser as date_parser
 
 from github_api import (
     GitHubAPIError,
-    GitHubClient,
-    QuotaManager,
     API_CALLS_PER_PR,
 )
+
+from managers import (
+    Config,
+    ConditionalBotConfig,
+    load_config,
+    StateManager,
+    QuotaManager,
+    CSVManager,
+    LoggingManager,
+)
+
+from data import (
+    PRFetcher,
+    MetricsGenerator,
+    count_comments_from_json,
+    get_review_metrics_from_json,
+    determine_pr_status,
+    get_ready_for_review_time as _get_ready_for_review_time_new,
+    PR_NUMBER_FIELD,
+)
+
+
+# Backward-compatible wrapper for get_ready_for_review_time
+# (old tests use old signature, will be updated in Step 8)
+def get_ready_for_review_time(
+    pr: Dict[str, Any], owner: str, repo: str, token: Optional[str]
+) -> str:
+    """Backward-compatible wrapper for get_ready_for_review_time."""
+    return _get_ready_for_review_time_new(pr, owner, repo, token, github_client, logger)
+
+
+# Re-export for backward compatibility with tests
+__all__ = [
+    "Config",
+    "ConditionalBotConfig",
+    "load_config",
+    "StateManager",
+    "QuotaManager",
+    "CSVManager",
+    "LoggingManager",
+    "PRFetcher",
+    "MetricsGenerator",
+    "count_comments_from_json",
+    "get_review_metrics_from_json",
+    "determine_pr_status",
+    "get_ready_for_review_time",
+    "PR_NUMBER_FIELD",
+]
 
 
 # Version
@@ -47,521 +81,30 @@ __version__ = "0.1.0"
 DEFAULT_WORKERS = 4
 DEFAULT_RAW_DATA_DIR = "data/raw"
 STATE_FILE = Path.home() / ".gh-pr-metrics-state.yaml"
-PR_NUMBER_FIELD = "pr_number"
 MAX_CHUNK_DAYS = 30  # Maximum days to process in a single chunk
 
 
 # ============================================================================
-# Configuration Management
+# Configuration Management (now in managers.config_manager)
 # ============================================================================
 
+# Imported from managers package
 
-class ConditionalBotConfig:
-    """Configuration for conditional AI bot detection."""
+# ============================================================================
+# State Management (now in managers.state_manager)
+# ============================================================================
 
-    def __init__(self, name: str, content_patterns: List[str], match_any: bool = True):
-        self.name = name
-        self.content_patterns = content_patterns
-        self.match_any = match_any
+# Imported from managers package
 
-    def matches_content(self, comment_body: str) -> bool:
-        """Check if comment body matches AI patterns using regex."""
-        import re
+# ============================================================================
+# CSV Management (now in managers.csv_manager)
+# ============================================================================
 
-        if not comment_body:
-            return False
+# Imported from managers package
 
-        if self.match_any:
-            # Any pattern match = AI
-            return any(re.search(pattern, comment_body) for pattern in self.content_patterns)
-        else:
-            # All patterns required = AI
-            return all(re.search(pattern, comment_body) for pattern in self.content_patterns)
-
-
-class Config:
-    """Application configuration loaded from YAML file."""
-
-    def __init__(self, config_dict: Dict[str, Any]):
-        """Initialize config from parsed YAML dict."""
-        # AI bot detection
-        ai_bots = config_dict.get("ai_bots", {})
-        self.always_ai_bots: List[str] = ai_bots.get("always", [])
-        self.conditional_bots: List[ConditionalBotConfig] = []
-
-        for bot_config in ai_bots.get("conditional", []):
-            self.conditional_bots.append(
-                ConditionalBotConfig(
-                    name=bot_config["name"],
-                    content_patterns=bot_config.get("content_patterns", []),
-                    match_any=bot_config.get("match_any", True),
-                )
-            )
-
-        # Processing settings
-        self.workers: int = config_dict.get("workers", DEFAULT_WORKERS)
-        self.output_pattern: Optional[str] = config_dict.get("output_pattern")
-        self.log_file: str = config_dict.get("log_file", "gh-pr-metrics.log")
-        self.raw_data_dir: str = config_dict.get("raw_data_dir", DEFAULT_RAW_DATA_DIR)
-
-    def is_ai_bot(self, login: str, comment_body: str = "") -> bool:
-        """
-        Determine if a login/comment is from an AI bot.
-
-        Args:
-            login: The GitHub login name
-            comment_body: The comment text (optional, for conditional detection)
-
-        Returns:
-            True if identified as AI bot, False otherwise
-        """
-        # Check always-AI bots with regex
-        import re
-
-        for pattern in self.always_ai_bots:
-            if re.match(pattern, login):
-                return True
-
-        # Check conditional bots with regex
-        for bot_config in self.conditional_bots:
-            if re.match(bot_config.name, login):
-                return bot_config.matches_content(comment_body)
-
-        return False
-
-
-def load_config(config_path: str) -> Config:
-    """
-    Load and validate configuration from YAML file.
-
-    Args:
-        config_path: Path to configuration file
-
-    Returns:
-        Validated Config object (uses defaults if file missing or empty)
-
-    Raises:
-        ValueError: If config YAML is invalid or output_pattern lacks placeholders
-    """
-    config_file = Path(config_path)
-
-    # Missing config file = use defaults
-    if not config_file.exists():
-        return Config({})
-
-    try:
-        with open(config_file, "r", encoding="utf-8") as f:
-            config_dict = yaml.safe_load(f)
-
-        # Empty config file = use defaults
-        if config_dict is None:
-            return Config({})
-
-        # Validate output_pattern has placeholders if set
-        output_pattern = config_dict.get("output_pattern")
-        if output_pattern and "{owner}" not in output_pattern and "{repo}" not in output_pattern:
-            raise ValueError(
-                f"Invalid output_pattern '{output_pattern}': "
-                "must contain {{owner}} and/or {{repo}} placeholders"
-            )
-
-        return Config(config_dict)
-
-    except yaml.YAMLError as e:
-        raise ValueError(f"Invalid YAML in configuration file: {e}")
-    except KeyError as e:
-        raise ValueError(f"Missing required configuration key: {e}")
-
-
-def with_lock(func):
-    """Decorator to synchronize access to StateManager methods using self._lock."""
-
-    def wrapper(self, *args, **kwargs):
-        with self._lock:
-            return func(self, *args, **kwargs)
-
-    return wrapper
-
-
-class StateManager:
-    """
-    Manages state file for tracking repository processing progress.
-
-    State file stores last update timestamp and CSV file path per repository.
-    Thread-safe via @with_lock decorator on all public methods.
-    """
-
-    def __init__(self, state_file_path: Path = None, logger=None):
-        """Initialize state manager with path to state file and logger."""
-        self._state_file = state_file_path or STATE_FILE
-        self._logger = logger
-        self._lock = threading.RLock()  # Reentrant lock for nested lock acquisitions
-
-    @with_lock
-    def load(self) -> Dict[str, Any]:
-        """Load state file containing last update dates per repo. Thread-safe."""
-        if not self._state_file.exists():
-            return {}
-
-        try:
-            with open(self._state_file, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-                return data
-        except Exception as e:
-            if self._logger:
-                self._logger.warning("Failed to load state file %s: %s", self._state_file, e)
-            return {}
-
-    @with_lock
-    def save(self, state: Dict[str, Any]) -> None:
-        """Save state file with last update dates per repo. Thread-safe."""
-        try:
-            with open(self._state_file, "w", encoding="utf-8") as f:
-                yaml.safe_dump(state, f, default_flow_style=False, sort_keys=True)
-
-            if self._logger:
-                self._logger.debug("Saved state file to %s", self._state_file)
-        except Exception as e:
-            if self._logger:
-                self._logger.error("Failed to save state file %s: %s", self._state_file, e)
-            raise
-
-    def get_repo_remote_url(self, owner: str, repo: str) -> str:
-        """
-        Get repository remote URL key for state tracking.
-        Uses format: https://github.com/owner/repo
-        """
-        return f"https://github.com/{owner}/{repo}"
-
-    @with_lock
-    def get_repo_state(self, owner: str, repo: str) -> Optional[Dict[str, Any]]:
-        """
-        Get state for a repository (timestamp and csv_file).
-        Returns dict with 'timestamp' and 'csv_file' keys, or None if not found.
-        Raises ValueError if state is malformed. Thread-safe.
-        """
-        state = self.load()
-        repo_key = self.get_repo_remote_url(owner, repo)
-
-        if repo_key not in state:
-            return None
-
-        entry = state[repo_key]
-
-        if not isinstance(entry, dict):
-            raise ValueError(
-                f"Invalid state format for {repo_key} in state file. "
-                f"Expected dict with 'timestamp' and 'csv_file', got {type(entry).__name__}"
-            )
-
-        timestamp_str = entry.get("timestamp", "")
-        csv_file = entry.get("csv_file")
-
-        if not timestamp_str:
-            raise ValueError(
-                f"Missing or empty 'timestamp' field for {repo_key} in state file. "
-                f"State file location: {self._state_file}"
-            )
-
-        if not csv_file:
-            raise ValueError(
-                f"Missing or empty 'csv_file' field for {repo_key} in state file. "
-                f"State file location: {self._state_file}"
-            )
-
-        try:
-            timestamp = parse_timestamp(timestamp_str)
-        except ValueError as e:
-            raise ValueError(
-                f"Invalid timestamp for {repo_key} in state file: {e}. "
-                f"State file location: {self._state_file}"
-            ) from e
-
-        return {"timestamp": timestamp, "csv_file": csv_file}
-
-    @with_lock
-    def update_repo(self, owner: str, repo: str, timestamp: datetime, csv_file: str) -> None:
-        """Update state file with new last update date and csv file. Thread-safe."""
-        state = self.load()
-        repo_key = self.get_repo_remote_url(owner, repo)
-        # Store as UTC timestamp without timezone component
-        utc_timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
-
-        # Preserve existing fields (especially failed_prs)
-        if repo_key not in state:
-            state[repo_key] = {}
-        elif not isinstance(state[repo_key], dict):
-            if self._logger:
-                self._logger.warning(
-                    "Malformed state for %s: expected dict, got %s. Resetting to empty dict.",
-                    repo_key,
-                    type(state[repo_key]).__name__,
-                )
-            state[repo_key] = {}
-
-        state[repo_key]["timestamp"] = utc_timestamp.isoformat()
-        state[repo_key]["csv_file"] = csv_file
-        self.save(state)
-
-    @with_lock
-    def mark_pr_failed(self, owner: str, repo: str, pr_number: int) -> None:
-        """Mark a PR as failed. Will be retried on next run. Thread-safe."""
-        state = self.load()
-        repo_key = self.get_repo_remote_url(owner, repo)
-
-        if repo_key not in state:
-            state[repo_key] = {}
-        elif not isinstance(state[repo_key], dict):
-            if self._logger:
-                self._logger.warning(
-                    "Malformed state for %s: expected dict, got %s.",
-                    repo_key,
-                    type(state[repo_key]).__name__,
-                )
-            state[repo_key] = {"timestamp": state[repo_key]}
-
-        if "failed_prs" not in state[repo_key]:
-            state[repo_key]["failed_prs"] = []
-
-        if pr_number not in state[repo_key]["failed_prs"]:
-            state[repo_key]["failed_prs"].append(pr_number)
-
-        self.save(state)
-        if self._logger:
-            self._logger.warning("Marked PR #%d as failed for %s/%s", pr_number, owner, repo)
-
-    @with_lock
-    def mark_pr_succeeded(self, owner: str, repo: str, pr_number: int) -> None:
-        """Remove a PR from failed list after successful fetch. Thread-safe."""
-        state = self.load()
-        repo_key = self.get_repo_remote_url(owner, repo)
-
-        if repo_key in state and isinstance(state[repo_key], dict):
-            failed_prs = state[repo_key].get("failed_prs", [])
-            if pr_number in failed_prs:
-                failed_prs.remove(pr_number)
-                state[repo_key]["failed_prs"] = failed_prs
-                self.save(state)
-                if self._logger:
-                    self._logger.info(
-                        "Removed PR #%d from failed list for %s/%s", pr_number, owner, repo
-                    )
-
-    @with_lock
-    def get_failed_prs(self, owner: str, repo: str) -> List[int]:
-        """Get list of failed PR numbers for a repository. Thread-safe."""
-        state = self.load()
-        repo_key = self.get_repo_remote_url(owner, repo)
-
-        if repo_key in state and isinstance(state[repo_key], dict):
-            return state[repo_key].get("failed_prs", [])
-        return []
-
-    @with_lock
-    def get_all_failed_prs_count(self) -> int:
-        """Get total count of failed PRs across all repositories. Thread-safe."""
-        state = self.load()
-        total = 0
-        for entry in state.values():
-            if isinstance(entry, dict):
-                total += len(entry.get("failed_prs", []))
-        return total
-
-    @with_lock
-    def get_all_tracked_repos(self) -> List[Dict[str, Any]]:
-        """
-        Get all tracked repositories from state file.
-        Returns list of dicts with 'url', 'owner', 'repo', 'timestamp', 'csv_file'.
-        Thread-safe.
-        """
-        state = self.load()
-        repos = []
-
-        for repo_url, entry in state.items():
-            # Parse URL to get owner/repo
-            # Format: https://github.com/owner/repo
-            try:
-                parts = repo_url.rstrip("/").split("/")
-                if len(parts) >= 2:
-                    owner = parts[-2]
-                    repo = parts[-1]
-
-                    if isinstance(entry, dict):
-                        timestamp = parse_timestamp(entry.get("timestamp", ""))
-                        csv_file = entry.get("csv_file")
-                    else:
-                        if self._logger:
-                            self._logger.warning("Skipping %s: invalid state format", repo_url)
-                        continue
-
-                    repos.append(
-                        {
-                            "url": repo_url,
-                            "owner": owner,
-                            "repo": repo,
-                            "timestamp": timestamp,
-                            "csv_file": csv_file,
-                        }
-                    )
-            except Exception as e:
-                if self._logger:
-                    self._logger.warning("Failed to parse state entry for %s: %s", repo_url, e)
-                continue
-
-        return repos
-
-
-class CSVManager:
-    """
-    Manages CSV I/O operations for PR metrics.
-
-    Handles reading existing CSV files, writing metrics data,
-    and managing field definitions. Thread-safe for concurrent access.
-    """
-
-    def __init__(self, logger=None):
-        """Initialize CSV manager with logger."""
-        self._logger = logger
-        self._lock = threading.RLock()
-
-    def get_fieldnames(self) -> List[str]:
-        """Get CSV field names in order."""
-        return [
-            PR_NUMBER_FIELD,
-            "title",
-            "author",
-            "created_at",
-            "ready_for_review_at",
-            "merged_at",
-            "closed_at",
-            "days_open",
-            "days_in_review",
-            "total_comment_count",
-            "non_ai_bot_comment_count",
-            "ai_bot_comment_count",
-            "non_ai_bot_login_names",
-            "ai_bot_login_names",
-            "changes_requested_count",
-            "unique_change_requesters",
-            "approval_count",
-            "status",
-            "url",
-            "errors",
-            "lines_added",
-            "lines_deleted",
-            "files_changed",
-            "total_line_changes",
-        ]
-
-    @with_lock
-    def read_csv(self, csv_file: str) -> Dict[int, Dict[str, Any]]:
-        """
-        Read existing CSV file and return dict keyed by PR number (thread-safe).
-        Returns empty dict if file doesn't exist or can't be read.
-        """
-        if not os.path.exists(csv_file):
-            return {}
-
-        try:
-            existing_data = {}
-            with open(csv_file, "r", newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    # Key by PR number for O(1) lookups
-                    pr_number = int(row[PR_NUMBER_FIELD])
-                    existing_data[pr_number] = row
-
-            if self._logger:
-                self._logger.debug("Loaded %d existing PRs from %s", len(existing_data), csv_file)
-            return existing_data
-        except Exception as e:
-            if self._logger:
-                self._logger.warning("Failed to read existing CSV %s: %s", csv_file, e)
-            return {}
-
-    @with_lock
-    def write_csv(
-        self,
-        metrics: List[Dict[str, Any]],
-        output_file: Optional[str],
-        merge_mode: bool = False,
-        force_write: bool = False,
-    ) -> None:
-        """
-        Write metrics to CSV file or stdout (thread-safe).
-
-        If merge_mode is True and output_file exists, existing PR data is loaded,
-        updated with new metrics, and written back.
-
-        If force_write is True, write headers even if metrics list is empty.
-        """
-        if not metrics and not force_write:
-            if self._logger:
-                self._logger.warning("No pull requests to output")
-            return
-
-        fieldnames = self.get_fieldnames()
-
-        # Merge with existing data if requested
-        if merge_mode and output_file:
-            # Re-read inside lock to get latest data
-            if not os.path.exists(output_file):
-                existing_data = {}
-            else:
-                try:
-                    existing_data = {}
-                    with open(output_file, "r", newline="", encoding="utf-8") as f:
-                        reader = csv.DictReader(f)
-                        for row in reader:
-                            pr_number = int(row[PR_NUMBER_FIELD])
-                            existing_data[pr_number] = row
-                except Exception:
-                    existing_data = {}
-
-            # Update existing data with new metrics
-            for metric in metrics:
-                pr_number = metric[PR_NUMBER_FIELD]
-                existing_data[pr_number] = metric
-
-            # Convert back to list
-            all_metrics = list(existing_data.values())
-            if self._logger:
-                self._logger.debug(
-                    "Merged data: %d total PRs (%d new/updated)", len(all_metrics), len(metrics)
-                )
-        else:
-            all_metrics = metrics
-
-        if output_file:
-            # Write to temp file first, then atomically rename
-            output_path = Path(output_file)
-            temp_fd, temp_path = tempfile.mkstemp(
-                dir=(output_path.parent if output_path.parent.exists() else tempfile.gettempdir()),
-                prefix=".tmp_pr_metrics_",
-                suffix=".csv",
-            )
-
-            try:
-                with os.fdopen(temp_fd, "w", newline="", encoding="utf-8") as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    writer.writeheader()
-                    writer.writerows(all_metrics)
-
-                # Atomic rename
-                os.rename(temp_path, output_file)
-                if self._logger:
-                    self._logger.debug("Wrote %d PRs to %s", len(all_metrics), output_file)
-            except Exception as e:
-                # Keep temp file for debugging
-                if self._logger:
-                    self._logger.error(
-                        "Failed to write CSV output. Temp file retained at: %s", temp_path
-                    )
-                raise e
-        else:
-            writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(all_metrics)
+# ============================================================================
+# PR Data Fetching and JSON Building
+# ============================================================================
 
 
 def build_pr_json_data(pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, Any]:
@@ -692,435 +235,6 @@ def write_pr_json(raw_data_dir: str, owner: str, repo: str, pr_data: Dict[str, A
 
 
 # ============================================================================
-# PRFetcher Class - Encapsulates PR data fetching and JSON caching
-# ============================================================================
-
-
-class PRFetcher:
-    """
-    Handles fetching PR data from GitHub API and caching as JSON.
-
-    Encapsulates all fetch-related operations:
-    - Fetching PR lists from GitHub
-    - Fetching PR details (comments, reviews, timeline)
-    - Writing PR data to JSON cache files
-    """
-
-    def __init__(
-        self,
-        github_client: GitHubClient,
-        quota_manager: QuotaManager,
-        config: Config,
-        logger: logging.Logger,
-        state_manager: StateManager,
-    ):
-        """
-        Initialize PRFetcher.
-
-        Args:
-            github_client: GitHub API client
-            quota_manager: API quota manager
-            config: Application configuration
-            logger: Logger instance
-            state_manager: State manager for tracking failed PRs
-        """
-        self.github_client = github_client
-        self.quota_manager = quota_manager
-        self.config = config
-        self.logger = logger
-        self.state_manager = state_manager
-
-    def fetch_pr_list(
-        self, owner: str, repo: str, start_date: datetime, end_date: datetime
-    ) -> List[Dict[str, Any]]:
-        """
-        Fetch list of PRs in date range.
-
-        Args:
-            owner: Repository owner
-            repo: Repository name
-            start_date: Start date for PR query
-            end_date: End date for PR query
-
-        Returns:
-            List of PR dictionaries (sorted oldest-first by updated_at)
-        """
-        return self.github_client.fetch_all_prs(owner, repo, start_date, end_date)
-
-    def fetch_pr_details(self, pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, Any]:
-        """
-        Fetch complete PR details including comments, reviews, and timeline.
-
-        This wraps the build_pr_json_data() function logic.
-
-        Args:
-            pr: Base PR object from GitHub API
-            owner: Repository owner
-            repo: Repository name
-
-        Returns:
-            Complete PR data dictionary ready for JSON serialization
-        """
-        pr_number = pr["number"]
-
-        # Fetch issue comments
-        issue_comments = []
-        fetch_errors = []
-        try:
-            comments = self.github_client.fetch_issue_comments(pr["comments_url"])
-            for comment in comments:
-                # Handle cases where user field is None (deleted/ghost users)
-                user = comment.get("user") or {}
-                issue_comments.append(
-                    {
-                        "id": comment.get("id"),
-                        "user": user.get("login"),
-                        "user_type": user.get("type"),
-                        "body": comment.get("body", ""),
-                        "created_at": comment.get("created_at"),
-                        "updated_at": comment.get("updated_at"),
-                    }
-                )
-        except GitHubAPIError as e:
-            self.logger.warning("Failed to fetch issue comments for PR #%d: %s", pr_number, e)
-            fetch_errors.append(f"issue_comments: {e}")
-
-        # Fetch review comments
-        review_comments = []
-        try:
-            comments = self.github_client.fetch_review_comments(pr["review_comments_url"])
-            for comment in comments:
-                # Handle cases where user field is None (deleted/ghost users)
-                user = comment.get("user") or {}
-                review_comments.append(
-                    {
-                        "id": comment.get("id"),
-                        "user": user.get("login"),
-                        "user_type": user.get("type"),
-                        "body": comment.get("body", ""),
-                        "path": comment.get("path"),
-                        "line": comment.get("line"),
-                        "created_at": comment.get("created_at"),
-                        "updated_at": comment.get("updated_at"),
-                    }
-                )
-        except GitHubAPIError as e:
-            self.logger.warning("Failed to fetch review comments for PR #%d: %s", pr_number, e)
-            fetch_errors.append(f"review_comments: {e}")
-
-        # Fetch reviews
-        reviews = []
-        try:
-            review_list = self.github_client.fetch_reviews(owner, repo, pr_number)
-            for review in review_list:
-                # Handle cases where user field is None (deleted/ghost users)
-                user = review.get("user") or {}
-                reviews.append(
-                    {
-                        "id": review.get("id"),
-                        "user": user.get("login"),
-                        "user_type": user.get("type"),
-                        "state": review.get("state"),
-                        "body": review.get("body", ""),
-                        "submitted_at": review.get("submitted_at"),
-                    }
-                )
-        except GitHubAPIError as e:
-            self.logger.warning("Failed to fetch reviews for PR #%d: %s", pr_number, e)
-            fetch_errors.append(f"reviews: {e}")
-
-        # Build complete PR data
-        # Handle cases where user field is None (deleted/ghost users)
-        pr_user = pr.get("user") or {}
-        pr_data = {
-            "pr_number": pr_number,
-            "title": pr["title"],
-            "author": pr_user.get("login"),
-            "author_type": pr_user.get("type"),
-            "state": pr["state"],
-            "created_at": pr["created_at"],
-            "updated_at": pr["updated_at"],
-            "merged_at": pr.get("merged_at"),
-            "closed_at": pr.get("closed_at"),
-            "draft": pr.get("draft", False),
-            "url": pr["html_url"],
-            "additions": pr.get("additions", 0),
-            "deletions": pr.get("deletions", 0),
-            "changed_files": pr.get("changed_files", 0),
-            "issue_comments": issue_comments,
-            "review_comments": review_comments,
-            "reviews": reviews,
-        }
-
-        # Include fetch errors if any occurred
-        if fetch_errors:
-            pr_data["fetch_errors"] = fetch_errors
-
-        return pr_data
-
-    def write_pr_json(self, owner: str, repo: str, pr_data: Dict[str, Any]) -> None:
-        """
-        Write PR data to JSON cache file.
-
-        Args:
-            owner: Repository owner
-            repo: Repository name
-            pr_data: Complete PR data dictionary
-        """
-        # Provider-aware path: raw_data_dir/github.com/owner/repo/
-        output_dir = Path(self.config.raw_data_dir) / "github.com" / owner / repo
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        pr_number = pr_data["pr_number"]
-        json_file = output_dir / f"{pr_number}.json"
-
-        try:
-            with open(json_file, "w", encoding="utf-8") as f:
-                json.dump(pr_data, f, indent=2, ensure_ascii=False)
-            self.logger.debug("Wrote PR #%d JSON to %s", pr_number, json_file)
-        except Exception as e:
-            self.logger.warning("Failed to write PR #%d JSON: %s", pr_number, e)
-
-    def fetch_and_cache_pr(self, pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, Any]:
-        """
-        Fetch PR details and cache to JSON file.
-
-        This is the main entry point for fetching a single PR.
-
-        Args:
-            pr: Base PR object from GitHub API
-            owner: Repository owner
-            repo: Repository name
-
-        Returns:
-            Complete PR data dictionary (same data written to JSON)
-        """
-        pr_number = pr["number"]
-        pr_data = self.fetch_pr_details(pr, owner, repo)
-        self.write_pr_json(owner, repo, pr_data)
-
-        # Track success/failure in state file
-        if "fetch_errors" in pr_data and pr_data["fetch_errors"]:
-            # Had errors during fetch - mark as failed for retry
-            self.state_manager.mark_pr_failed(owner, repo, pr_number)
-        else:
-            # Successful fetch - remove from failed list if present
-            self.state_manager.mark_pr_succeeded(owner, repo, pr_number)
-
-        return pr_data
-
-
-# ============================================================================
-# MetricsGenerator Class - Encapsulates metrics calculation and CSV generation
-# ============================================================================
-
-
-class MetricsGenerator:
-    """
-    Handles generating CSV metrics from PR JSON data.
-
-    Encapsulates all metrics-related operations:
-    - Reading PR JSON from cache
-    - Calculating metrics from PR data
-    - Converting PR data to CSV rows
-    """
-
-    def __init__(self, config: Config, logger: logging.Logger):
-        """
-        Initialize MetricsGenerator.
-
-        Args:
-            config: Application configuration
-            logger: Logger instance
-        """
-        self.config = config
-        self.logger = logger
-
-    def read_pr_json(self, owner: str, repo: str, pr_number: int) -> Optional[Dict[str, Any]]:
-        """
-        Read PR JSON from cache file.
-
-        Args:
-            owner: Repository owner
-            repo: Repository name
-            pr_number: PR number
-
-        Returns:
-            PR data dictionary, or None if file doesn't exist or can't be read
-        """
-        # Provider-aware path: raw_data_dir/github.com/owner/repo/pr_number.json
-        json_file = (
-            Path(self.config.raw_data_dir) / "github.com" / owner / repo / f"{pr_number}.json"
-        )
-
-        if not json_file.exists():
-            self.logger.warning("PR #%d JSON file not found: %s", pr_number, json_file)
-            return None
-
-        try:
-            with open(json_file, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            self.logger.warning("Failed to read PR #%d JSON: %s", pr_number, e)
-            return None
-
-    def calculate_metrics(
-        self,
-        pr: Dict[str, Any],
-        pr_json_data: Dict[str, Any],
-        owner: str,
-        repo: str,
-        token: Optional[str],
-    ) -> Dict[str, Any]:
-        """
-        Calculate metrics from PR JSON data.
-
-        This wraps the process_pr() function logic.
-
-        Args:
-            pr: Base PR object
-            pr_json_data: Complete PR data (includes comments, reviews)
-            owner: Repository owner
-            repo: Repository name
-            token: GitHub token
-
-        Returns:
-            Metrics dictionary for CSV
-        """
-        pr_number = pr["number"]
-        self.logger.debug("Processing PR #%d: %s", pr_number, pr["title"])
-
-        errors = []
-        metrics: Dict[str, Any] = {
-            PR_NUMBER_FIELD: pr_number,
-            "title": pr["title"],
-            "author": pr["user"]["login"] if pr.get("user") else "",
-            "created_at": pr["created_at"],
-            "url": pr["html_url"],
-        }
-
-        # Ready for review time
-        try:
-            metrics["ready_for_review_at"] = get_ready_for_review_time(pr, owner, repo, token)
-        except Exception as e:
-            self.logger.debug("Error getting ready time for PR #%d: %s", pr_number, e)
-            metrics["ready_for_review_at"] = pr["created_at"]
-            errors.append(f"ready_time: {e}")
-
-        # Use reviews from pr_json_data
-        reviews = pr_json_data.get("reviews", [])
-
-        # Comment counts (including review bodies) - use data from pr_json_data
-        try:
-            total_comments, non_ai_bot_comments, ai_bot_comments, non_ai_bot_names, ai_bot_names = (
-                count_comments_from_json(pr_json_data, self.config)
-            )
-            metrics["total_comment_count"] = total_comments
-            metrics["non_ai_bot_comment_count"] = non_ai_bot_comments
-            metrics["ai_bot_comment_count"] = ai_bot_comments
-            metrics["non_ai_bot_login_names"] = non_ai_bot_names
-            metrics["ai_bot_login_names"] = ai_bot_names
-        except Exception as e:
-            self.logger.debug("Error counting comments for PR #%d: %s", pr_number, e)
-            metrics["total_comment_count"] = 0
-            metrics["non_ai_bot_comment_count"] = 0
-            metrics["ai_bot_comment_count"] = 0
-            metrics["non_ai_bot_login_names"] = ""
-            metrics["ai_bot_login_names"] = ""
-            errors.append(f"comments: {e}")
-
-        # Review metrics - use reviews from pr_json_data
-        try:
-            changes_requested, unique_requesters, approvals = get_review_metrics_from_json(reviews)
-            metrics["changes_requested_count"] = changes_requested
-            metrics["unique_change_requesters"] = unique_requesters
-            metrics["approval_count"] = approvals
-        except Exception as e:
-            self.logger.debug("Error getting reviews for PR #%d: %s", pr_number, e)
-            metrics["changes_requested_count"] = 0
-            metrics["unique_change_requesters"] = 0
-            metrics["approval_count"] = 0
-            errors.append(f"reviews: {e}")
-
-        # Status
-        metrics["status"] = determine_pr_status(pr)
-
-        # Merged and closed timestamps
-        metrics["merged_at"] = pr.get("merged_at") or ""
-        metrics["closed_at"] = pr.get("closed_at") or ""
-
-        # Calculate derived time metrics
-        try:
-            created_at = date_parser.parse(pr["created_at"])
-            ready_at = date_parser.parse(metrics["ready_for_review_at"])
-
-            # Determine end time (merged, closed, or now)
-            if metrics["merged_at"]:
-                end_time = date_parser.parse(metrics["merged_at"])
-            elif metrics["closed_at"]:
-                end_time = date_parser.parse(metrics["closed_at"])
-            else:
-                end_time = datetime.now(timezone.utc)
-
-            # days_open: created → end
-            days_open = (end_time - created_at).total_seconds() / 86400
-            metrics["days_open"] = round(days_open, 2)
-
-            # days_in_review: ready_for_review → end
-            days_in_review = (end_time - ready_at).total_seconds() / 86400
-            metrics["days_in_review"] = round(days_in_review, 2)
-
-        except Exception as e:
-            self.logger.debug("Error calculating time metrics for PR #%d: %s", pr_number, e)
-            metrics["days_open"] = ""
-            metrics["days_in_review"] = ""
-            errors.append(f"time_metrics: {e}")
-
-        # Complexity metrics
-        metrics["lines_added"] = pr.get("additions", 0)
-        metrics["lines_deleted"] = pr.get("deletions", 0)
-        metrics["files_changed"] = pr.get("changed_files", 0)
-        metrics["total_line_changes"] = metrics["lines_added"] + metrics["lines_deleted"]
-
-        # Include fetch errors from PR JSON data if present
-        if "fetch_errors" in pr_json_data:
-            errors.extend(pr_json_data["fetch_errors"])
-
-        # Errors
-        metrics["errors"] = "; ".join(errors) if errors else ""
-
-        return metrics
-
-
-class LoggingManager:
-    """
-    Manages application logging with quota-aware prefixes.
-
-    Wraps standard logging to inject API quota status into all log messages.
-    """
-
-    def __init__(self, quota_manager: QuotaManager):
-        """Initialize logging manager with reference to quota manager."""
-        self._quota_manager = quota_manager
-
-    def info(self, msg: str, *args, **kwargs) -> None:
-        """Log INFO with API quota prefix."""
-        logging.info(f"{self._quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
-
-    def warning(self, msg: str, *args, **kwargs) -> None:
-        """Log WARNING with API quota prefix."""
-        logging.warning(f"{self._quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
-
-    def error(self, msg: str, *args, **kwargs) -> None:
-        """Log ERROR with API quota prefix."""
-        logging.error(f"{self._quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
-
-    def debug(self, msg: str, *args, **kwargs) -> None:
-        """Log DEBUG with API quota prefix."""
-        logging.debug(f"{self._quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
-
-
-# ============================================================================
 # Global Manager Instances
 # ============================================================================
 
@@ -1134,88 +248,6 @@ csv_manager = CSVManager(logger=logger)
 # ============================================================================
 # PR Processing Functions
 # ============================================================================
-
-
-def get_ready_for_review_time(
-    pr: Dict[str, Any], owner: str, repo: str, token: Optional[str]
-) -> str:
-    """Get the timestamp when PR was last marked ready for review."""
-    # If never a draft, use created_at
-    if not pr.get("draft", False) and pr.get("created_at"):
-        # Check events to see if it was ever a draft
-        try:
-            events = github_client.fetch_timeline_events(owner, repo, pr["number"])
-            # Filter out None entries (deleted/removed events from GitHub API)
-            ready_events = [e for e in events if e and e.get("event") == "ready_for_review"]
-            if ready_events:
-                # Use the latest ready_for_review event
-                return ready_events[-1]["created_at"]
-        except GitHubAPIError as e:
-            logger.debug("Failed to fetch events for PR #%d: %s", pr["number"], e)
-
-    return pr["created_at"]
-
-
-def count_comments_from_json(
-    pr_json_data: Dict[str, Any],
-    config: Config,
-) -> tuple[int, int, int, str, str]:
-    """
-    Count comments from pre-fetched PR JSON data.
-    Returns (total_comments, non_ai_bot_comments, ai_bot_comments, non_ai_bot_names, ai_bot_names).
-    """
-    total_comments = 0
-    non_ai_bot_comments = 0
-    ai_bot_comments = 0
-    non_ai_bot_logins = set()
-    ai_bot_logins = set()
-
-    # Count issue comments
-    for comment in pr_json_data.get("issue_comments", []):
-        if comment.get("user_type") == "Bot":
-            total_comments += 1
-            login = comment.get("user", "")
-            body = comment.get("body", "")
-            if config.is_ai_bot(login, body):
-                ai_bot_logins.add(login)
-                ai_bot_comments += 1
-            else:
-                non_ai_bot_logins.add(login)
-                non_ai_bot_comments += 1
-
-    # Count review comments
-    for comment in pr_json_data.get("review_comments", []):
-        if comment.get("user_type") == "Bot":
-            total_comments += 1
-            login = comment.get("user", "")
-            body = comment.get("body", "")
-            if config.is_ai_bot(login, body):
-                ai_bot_logins.add(login)
-                ai_bot_comments += 1
-            else:
-                non_ai_bot_logins.add(login)
-                non_ai_bot_comments += 1
-
-    # Count review bodies
-    for review in pr_json_data.get("reviews", []):
-        body = review.get("body", "")
-        if body and review.get("user_type") == "Bot":
-            total_comments += 1
-            login = review.get("user", "")
-            if config.is_ai_bot(login, body):
-                ai_bot_logins.add(login)
-                ai_bot_comments += 1
-            else:
-                non_ai_bot_logins.add(login)
-                non_ai_bot_comments += 1
-
-    return (
-        total_comments,
-        non_ai_bot_comments,
-        ai_bot_comments,
-        ",".join(sorted(non_ai_bot_logins)),
-        ",".join(sorted(ai_bot_logins)),
-    )
 
 
 def count_comments(
@@ -1352,34 +384,6 @@ def count_comments(
     )
 
 
-def get_review_metrics_from_json(reviews: List[Dict[str, Any]]) -> tuple[int, int, int]:
-    """
-    Get review metrics from pre-fetched reviews.
-    Returns (changes_requested_count, unique_change_requesters, approval_count).
-    """
-    # Count total change requests
-    changes_requested_count = sum(1 for r in reviews if r.get("state") == "CHANGES_REQUESTED")
-
-    # Count unique reviewers who requested changes
-    change_requesters = {
-        r.get("user", "")
-        for r in reviews
-        if r.get("state") == "CHANGES_REQUESTED" and r.get("user")
-    }
-    unique_change_requesters = len(change_requesters)
-
-    # Get most recent review state per reviewer for approvals
-    reviewer_states: Dict[str, str] = {}
-    for review in reviews:
-        if review.get("user") and review.get("state"):
-            user = review.get("user")
-            reviewer_states[user] = review["state"]
-
-    approval_count = sum(1 for state in reviewer_states.values() if state == "APPROVED")
-
-    return changes_requested_count, unique_change_requesters, approval_count
-
-
 def get_review_metrics(
     pr: Dict[str, Any],
     owner: str,
@@ -1424,18 +428,6 @@ def get_review_metrics(
     approval_count = sum(1 for state in reviewer_states.values() if state == "APPROVED")
 
     return changes_requested_count, unique_change_requesters, approval_count
-
-
-def determine_pr_status(pr: Dict[str, Any]) -> str:
-    """Determine the current status of the PR."""
-    if pr.get("draft"):
-        return "draft"
-    elif pr.get("merged_at"):
-        return "merged"
-    elif pr.get("state") == "closed":
-        return "closed"
-    else:
-        return "open"
 
 
 def process_pr(
@@ -1570,979 +562,47 @@ def process_pr(
 # ============================================================================
 
 
-def parse_arguments() -> argparse.Namespace:
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Generate CSV reports of GitHub pull request metrics",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Analyze PRs from current repository (last year)
-  gh-pr-metrics
-
-  # Specify repository explicitly
-  gh-pr-metrics --owner microsoft --repo vscode
-
-  # Custom time range
-  gh-pr-metrics --start 2024-01-01 --end 2024-12-31
-
-  # Output to file (stores path in state for future updates)
-  gh-pr-metrics --output metrics.csv
-
-  # Initialize repositories (validates access, creates state entries)
-  gh-pr-metrics --init --owner ansible --output "data/{owner}-{repo}.csv" --start "2024-11-01"
-
-  # Update specific repo (uses stored CSV path from state)
-  gh-pr-metrics --owner microsoft --repo vscode --update
-
-  # Update all tracked repositories
-  gh-pr-metrics --update-all
-
-Environment Variables:
-  GITHUB_TOKEN    GitHub personal access token for authentication
-        """,
-    )
-
-    parser.add_argument("--owner", help="Repository owner (default: auto-detect from git)")
-    parser.add_argument("--repo", help="Repository name (default: auto-detect from git)")
-    parser.add_argument(
-        "--pr",
-        type=int,
-        help="Update a specific PR number only (surgically update existing CSV)",
-    )
-    parser.add_argument(
-        "--start",
-        help="Start timestamp (ISO 8601, RFC 3339, or Unix timestamp). Default: 365 days ago",
-    )
-    parser.add_argument(
-        "--end",
-        help="End timestamp (ISO 8601, RFC 3339, or Unix timestamp). Default: now",
-    )
-    parser.add_argument("--output", "-o", help="Output file path (default: stdout)")
-    parser.add_argument(
-        "--init",
-        action="store_true",
-        help="Initialize repositories in state file. Validates access and stores --start date. "
-        "Requires --owner and --output. If only --owner provided, initializes all repos. "
-        "Output supports patterns like 'data/{owner}-{repo}.csv'",
-    )
-    parser.add_argument(
-        "--update",
-        action="store_true",
-        help="Update mode: fetch only PRs since last update and merge with existing CSV. "
-        "Requires --owner and --repo. Uses CSV path stored in state file. "
-        "Cannot be used with --output (uses stored path).",
-    )
-    parser.add_argument(
-        "--update-all",
-        action="store_true",
-        help="Update all tracked repositories. Cannot be used with --owner/--repo or --output.",
-    )
-    parser.add_argument(
-        "--wait",
-        action="store_true",
-        help="Wait for rate limit to reset if quota exhausted, then continue processing.",
-    )
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=None,
-        help="Number of parallel workers for processing PRs (default: from config file)",
-    )
-    parser.add_argument(
-        "--config",
-        default=".gh-pr-metrics.yaml",
-        help="Configuration file path (default: .gh-pr-metrics.yaml)",
-    )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-
-    if ARGCOMPLETE_AVAILABLE:
-        argcomplete.autocomplete(parser)
-
-    return parser.parse_args()
-
-
-def show_update_all_progress_summary(
-    tracked_repos: List[Dict[str, Any]], completed_repos: int, stopped_at: Optional[str] = None
-) -> None:
+def main() -> int:
     """
-    Show progress summary for update-all operation.
-
-    Args:
-        tracked_repos: List of all tracked repositories
-        completed_repos: Number of repos completed in this pass
-        stopped_at: Optional repo name where processing stopped (if partial)
-    """
-    logger.info("=" * 80)
-    logger.info("Progress Summary:")
-
-    if stopped_at:
-        logger.info("  Completed this pass: %d repos", completed_repos)
-        logger.info("  Stopped at (partial): %s", stopped_at)
-    else:
-        logger.info("  Completed: %d repos (not started yet)", completed_repos)
-
-    # Analyze state file to show what's current
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(hours=12)
-
-    recently_updated = 0
-    needs_processing = 0
-
-    for repo_info in tracked_repos:
-        if repo_info["timestamp"] > cutoff:
-            recently_updated += 1
-        else:
-            needs_processing += 1
-
-    logger.info("  Recently updated (< 12 hours): %d repos", recently_updated)
-    logger.info("  Needs processing (> 12 hours): %d repos", needs_processing)
-
-
-def fetch_and_process_pr(
-    pr: Dict[str, Any],
-    owner: str,
-    repo: str,
-    token: Optional[str],
-    config: Config,
-    pr_fetcher: PRFetcher,
-    metrics_generator: MetricsGenerator,
-) -> Dict[str, Any]:
-    """
-    Fetch complete PR data, process metrics, and write JSON.
-
-    Args:
-        pr: Base PR object from GitHub API
-        owner: Repository owner
-        repo: Repository name
-        token: GitHub API token
-        config: Application configuration
-        pr_fetcher: PRFetcher instance for fetching and caching PR data
-        metrics_generator: MetricsGenerator instance for calculating metrics
+    Main entry point with subcommand architecture.
 
     Returns:
-        Metrics dict for CSV
+        Exit code (0 for success, non-zero for failure)
     """
-    pr_json_data = pr_fetcher.fetch_and_cache_pr(pr, owner, repo)
-    pr_metrics = metrics_generator.calculate_metrics(pr, pr_json_data, owner, repo, token)
-    return pr_metrics
-
-
-def update_single_pr(
-    owner: str,
-    repo: str,
-    pr_number: int,
-    output_file: str,
-    token: Optional[str],
-    config: Config,
-) -> int:
-    """
-    Update a single PR in an existing CSV file.
-
-    Returns 0 on success, 1 on error.
-    """
-    logger.info("Fetching PR #%d from %s/%s", pr_number, owner, repo)
-
     try:
-        pr = github_client.fetch_single_pr(owner, repo, pr_number)
-    except GitHubAPIError as e:
-        logger.error("Failed to fetch PR #%d: %s", pr_number, e)
-        return 1
+        # Parse arguments
+        command_name, args = parse_arguments()
 
-    logger.info("Processing PR #%d", pr_number)
-    try:
-        # Create PRFetcher and MetricsGenerator instances
-        pr_fetcher = PRFetcher(github_client, quota_manager, config, logger, state_manager)
-        metrics_generator = MetricsGenerator(config, logger)
-        pr_metrics = fetch_and_process_pr(
-            pr, owner, repo, token, config, pr_fetcher, metrics_generator
-        )
+        # Import commands
+        from commands import InitCommand, FetchCommand, CsvCommand
+
+        # Map command name to class
+        command_map = {
+            "init": InitCommand,
+            "fetch": FetchCommand,
+            "csv": CsvCommand,
+        }
+
+        # Get command class
+        command_class = command_map.get(command_name)
+        if not command_class:
+            print(f"Unknown command: {command_name}", file=sys.stderr)
+            return 1
+
+        # Instantiate and run command
+        command = command_class()
+        command.setup(args)
+        return command.run(args)
+
+    except KeyboardInterrupt:
+        print("\nInterrupted by user", file=sys.stderr)
+        return 130
     except Exception as e:
-        logger.error("Failed to process PR #%d: %s", pr_number, e)
+        print(f"Error: {e}", file=sys.stderr)
+        import traceback
+
+        traceback.print_exc()
         return 1
-
-    # Read existing CSV
-    if not Path(output_file).exists():
-        logger.error("CSV file not found: %s", output_file)
-        logger.error("Use regular mode first to create the CSV file")
-        return 1
-
-    # Read existing CSV as dict keyed by PR number
-    logger.info("Reading existing CSV: %s", output_file)
-    existing_data = csv_manager.read_csv(output_file)
-
-    # Update the PR in the dictionary
-    if pr_number in existing_data:
-        logger.info("Updating existing PR #%d in CSV", pr_number)
-    else:
-        logger.info("Adding new PR #%d to CSV", pr_number)
-
-    existing_data[pr_number] = pr_metrics
-
-    # Convert dict to list and write back to CSV
-    all_metrics = list(existing_data.values())
-    logger.info("Writing updated CSV: %s", output_file)
-    csv_manager.write_csv(all_metrics, output_file, merge_mode=False)
-
-    logger.info("Successfully updated PR #%d", pr_number)
-    return 0
-
-
-def process_repository(
-    owner: str,
-    repo: str,
-    output_file: str,
-    start_date: datetime,
-    end_date: datetime,
-    token: Optional[str],
-    workers: int,
-    config: Config,
-    merge_mode: bool = False,
-) -> tuple[int, int, int]:
-    """
-    Process a single repository and generate/update metrics CSV using page-based processing.
-
-    Fetches PRs one page at a time (sorted by updated date), processes each page,
-    and checks rate limit before fetching the next page. Saves progress after each page.
-
-    Returns (exit_code, chunks_completed, total_chunks_fetched).
-    exit_code: 0 on success, 1 on error/stopped
-    chunks_completed: Number of chunks successfully processed
-    total_chunks_fetched: Total chunks fetched (may be more than completed if stopped mid-chunk)
-    """
-    repo_ctx = f"{owner}/{repo}"
-
-    logger.info("[%s] Starting processing", repo_ctx)
-    logger.info("[%s] Date range: %s to %s", repo_ctx, start_date.isoformat(), end_date.isoformat())
-
-    # Check for previously failed PRs that need retry
-    failed_prs = state_manager.get_failed_prs(owner, repo)
-    if failed_prs:
-        logger.warning(
-            "[%s] Found %d previously failed PR(s) to retry: %s",
-            repo_ctx,
-            len(failed_prs),
-            failed_prs,
-        )
-
-    # Create PRFetcher and MetricsGenerator instances for this repository
-    pr_fetcher = PRFetcher(github_client, quota_manager, config, logger, state_manager)
-    metrics_generator = MetricsGenerator(config, logger)
-
-    # Check quota before starting any work
-    max_prs_can_process = quota_manager.calculate_max_prs()
-    if max_prs_can_process == 0:
-        remaining, limit, _ = quota_manager.get_current_quota()
-        logger.error(
-            "[%s] Cannot process any PRs with current quota (exhausted or below reserve)",
-            repo_ctx,
-        )
-        logger.error(
-            "[%s] Current quota: %d/%d remaining",
-            repo_ctx,
-            remaining,
-            limit,
-        )
-        # Note: per-repo wait not implemented, only at update-all level
-        return 1, 0, 0
-
-    logger.info(
-        "[%s] Quota check: can process up to ~%d PRs before hitting reserve",
-        repo_ctx,
-        max_prs_can_process,
-    )
-
-    logger.info("[%s] Fetching PRs sorted by updated date (oldest first)", repo_ctx)
-
-    # Step 1: Fetch all PRs in date range (internally descending, returns ascending)
-    total_chunks_fetched = 0  # Will be calculated from PR count
-    chunks_completed = 0  # Initialize early for error handlers
-
-    try:
-        all_prs = pr_fetcher.fetch_pr_list(owner, repo, start_date, end_date)
-
-        # Add previously failed PRs to the front of the list for priority retry
-        if failed_prs:
-            failed_pr_objects = []
-            for pr_number in failed_prs:
-                try:
-                    pr = github_client.fetch_pr(owner, repo, pr_number)
-                    failed_pr_objects.append(pr)
-                    logger.info("[%s] Added failed PR #%d to retry list", repo_ctx, pr_number)
-                except GitHubAPIError as e:
-                    logger.error("[%s] Cannot fetch failed PR #%d: %s", repo_ctx, pr_number, e)
-
-            # Prepend failed PRs to all_prs (processed first)
-            # Remove duplicates if failed PR is also in date range
-            pr_numbers_in_list = {pr["number"] for pr in all_prs}
-            failed_pr_objects = [
-                pr for pr in failed_pr_objects if pr["number"] not in pr_numbers_in_list
-            ]
-            all_prs = failed_pr_objects + all_prs
-            logger.info(
-                "[%s] Prioritizing %d failed PR(s) for retry", repo_ctx, len(failed_pr_objects)
-            )
-
-        if not all_prs:
-            logger.info("[%s] No pull requests found in the specified date range", repo_ctx)
-            state_manager.update_repo(owner, repo, end_date, output_file)
-            return 0, 1, 0
-
-        logger.info("[%s] Collected %d PRs total", repo_ctx, len(all_prs))
-        # Estimate chunks fetched (for return value compatibility)
-        total_chunks_fetched = (len(all_prs) + 99) // 100  # Round up
-
-        # Step 2: Process PRs in chunks with incremental saves
-        # PRs are already in ascending order (oldest-first) from fetch_all_prs
-        chunk_size = 100
-        chunk_num = 0
-        last_processed_timestamp = start_date
-
-        for chunk_start in range(0, len(all_prs), chunk_size):
-            chunk_num += 1
-            chunk_end = min(chunk_start + chunk_size, len(all_prs))
-            prs_chunk = all_prs[chunk_start:chunk_end]
-            total_prs = len(prs_chunk)
-
-            chunk_info_str = f"Chunk {chunk_num}/{total_chunks_fetched}: "
-
-            logger.info("[%s] %sProcessing %d PRs", repo_ctx, chunk_info_str, total_prs)
-
-            # Check rate limit and truncate chunk if needed
-            estimated_calls = estimate_api_calls_for_prs(total_prs)
-            sufficient, max_prs = quota_manager.check_sufficient(
-                estimated_calls, repo_ctx, chunk_info_str, get_github_token, logger
-            )
-
-            if not sufficient:
-                # Can't process full chunk, but maybe we can process some PRs
-                if max_prs > 0:
-                    # Truncate to what we can handle
-                    logger.warning(
-                        "[%s] Chunk %d: Truncating from %d to %d PRs due to quota limit",
-                        repo_ctx,
-                        chunk_num,
-                        total_prs,
-                        max_prs,
-                    )
-                    prs_chunk = prs_chunk[:max_prs]
-                    total_prs = len(prs_chunk)
-                else:
-                    # Can't process any PRs
-                    logger.error(
-                        "[%s] Stopping at chunk %d due to insufficient rate limit",
-                        repo_ctx,
-                        chunk_num,
-                    )
-                    logger.error(
-                        "[%s] Progress saved. Resume with --update (or --update-all) "
-                        "after rate limit resets.",
-                        repo_ctx,
-                    )
-                    return 1, chunks_completed, total_chunks_fetched
-
-            # Process this chunk of PRs
-            metrics = []
-            completed = 0
-
-            logger.info(
-                "[%s] %sProcessing %d PRs with %d workers",
-                repo_ctx,
-                chunk_info_str,
-                total_prs,
-                workers,
-            )
-
-            # Process PRs in parallel - each writes to CSV immediately (thread-safe)
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                future_to_pr = {
-                    executor.submit(
-                        fetch_and_process_pr,
-                        pr,
-                        owner,
-                        repo,
-                        token,
-                        config,
-                        pr_fetcher,
-                        metrics_generator,
-                    ): pr
-                    for pr in prs_chunk
-                }
-
-                for future in as_completed(future_to_pr):
-                    pr = future_to_pr[future]
-                    completed += 1
-                    pr_number = pr["number"]
-                    try:
-                        pr_metrics = future.result()
-
-                        # Write to CSV immediately (thread-safe)
-                        csv_manager.write_csv([pr_metrics], output_file, merge_mode=True)
-                        metrics.append(pr_metrics)
-
-                        logger.info(
-                            "[%s] %s: Completed PR %d/%d: #%d (updated: %s)",
-                            repo_ctx,
-                            chunk_info_str,
-                            completed,
-                            total_prs,
-                            pr_number,
-                            pr.get("updated_at", "unknown"),
-                        )
-                    except Exception as e:
-                        logger.error(
-                            "[%s] %s: Failed to process PR #%d: %s",
-                            repo_ctx,
-                            chunk_info_str,
-                            pr_number,
-                            e,
-                        )
-
-            # CSV already written incrementally during processing
-            # Find the timestamp to set in the state file
-            if prs_chunk:
-                # Default to the updated_at of the last PR in this chunk
-                last_processed_timestamp = date_parser.parse(prs_chunk[-1]["updated_at"])
-
-            # Check if this is the last chunk and we had sufficient quota
-            is_last_chunk = chunk_end >= len(all_prs)
-            if is_last_chunk and sufficient:
-                # Completed all PRs with sufficient quota - set to query time
-                last_processed_timestamp = end_date
-
-            # Update state file
-            state_manager.update_repo(owner, repo, last_processed_timestamp, output_file)
-            chunks_completed += 1
-            logger.info(
-                "[%s] %s: Processed %d PRs, updated state to %s",
-                repo_ctx,
-                chunk_info_str,
-                len(metrics),
-                last_processed_timestamp.isoformat(),
-            )
-
-            # If quota insufficient and more chunks remain, stop with error
-            if not sufficient and not is_last_chunk:
-                # Stopped mid-processing due to quota - return error code
-                logger.error(
-                    "[%s] Stopped at chunk %d/%d due to quota exhaustion",
-                    repo_ctx,
-                    chunks_completed,
-                    total_chunks_fetched,
-                )
-                return 1, chunks_completed, total_chunks_fetched
-
-    except GitHubAPIError as e:
-        logger.error("[%s] GitHub API error: %s", repo_ctx, e)
-        return 1, chunks_completed, total_chunks_fetched
-    except Exception as e:
-        logger.error("[%s] Unexpected error: %s", repo_ctx, e, exc_info=True)
-        return 1, chunks_completed, total_chunks_fetched
-
-    # Successfully completed all chunks
-    logger.info("[%s] Successfully completed all %d chunks", repo_ctx, chunks_completed)
-    return 0, chunks_completed, total_chunks_fetched
-
-
-def main() -> int:
-    """Main entry point."""
-    args = parse_arguments()
-
-    # Load configuration (uses defaults if file missing)
-    try:
-        config = load_config(args.config)
-    except ValueError as e:
-        print(f"Error loading configuration: {e}", file=sys.stderr)
-        print(f"Configuration file: {args.config}", file=sys.stderr)
-        return 1
-
-    setup_logging(args.debug, config.log_file)
-
-    logger.info("GitHub PR Metrics Tool v%s", __version__)
-    logger.info("Configuration file: %s", args.config)
-    logger.info("Logging to: %s", config.log_file)
-    logger.debug("Arguments: %s", args)
-
-    # Check for failed PRs from previous runs
-    failed_count = state_manager.get_all_failed_prs_count()
-    if failed_count > 0:
-        logger.warning(
-            "Found %d previously failed PR(s) tracked across all repositories", failed_count
-        )
-        logger.warning("These PRs will be retried automatically during processing")
-
-    # Validate argument combinations
-    if args.init and not args.owner:
-        logger.error("--init requires --owner")
-        return 1
-
-    if args.init and not (args.output or config.output_pattern):
-        logger.error(
-            "--init requires --output or output_pattern in config "
-            "(supports patterns like 'data/{owner}-{repo}.csv')"
-        )
-        return 1
-
-    if args.init and not args.start:
-        logger.error("--init requires --start to specify the starting date")
-        return 1
-
-    if args.init and args.end:
-        logger.error("--init cannot be used with --end (uses current time)")
-        return 1
-
-    if args.init and (args.update or args.update_all):
-        logger.error("--init cannot be used with --update or --update-all")
-        return 1
-
-    if args.update and args.output:
-        logger.error("--update and --output cannot be used together (update uses stored CSV path)")
-        return 1
-
-    if args.update and (args.start or args.end):
-        logger.error(
-            "--update cannot be used with --start or --end (uses last update date from state)"
-        )
-        return 1
-
-    if args.update_all and args.output:
-        logger.error("--update-all and --output cannot be used together (uses stored CSV paths)")
-        return 1
-
-    if args.update_all and (args.start or args.end):
-        logger.error(
-            "--update-all cannot be used with --start or --end (uses last update dates from state)"
-        )
-        return 1
-
-    if args.update_all and (args.owner or args.repo):
-        logger.error("--update-all cannot be used with --owner or --repo")
-        return 1
-
-    if args.update and args.update_all:
-        logger.error("--update and --update-all cannot be used together")
-        return 1
-
-    if args.wait and not args.update_all:
-        logger.error("--wait can only be used with --update-all")
-        return 1
-
-    if args.pr and (args.init or args.update or args.update_all):
-        logger.error("--pr cannot be used with --init, --update, or --update-all")
-        return 1
-
-    if args.pr and not args.output and not config.output_pattern:
-        logger.error("--pr requires --output or config output_pattern to specify the CSV file")
-        return 1
-
-    # Regular mode requires --start (update modes use state file timestamps)
-    if not (args.init or args.update or args.update_all or args.pr) and not args.start:
-        logger.error("--start is required to specify the starting date")
-        return 1
-
-    # Get GitHub token and initialize client
-    token = get_github_token()
-    global github_client
-    github_client = GitHubClient(token, quota_manager, logger)
-
-    # Determine workers: CLI override takes precedence, otherwise use config default
-    workers = args.workers if args.workers else config.workers
-
-    if not token:
-        logger.warning(
-            "No GITHUB_TOKEN found. API rate limits will be restrictive "
-            "for unauthenticated requests."
-        )
-        # Force single worker to avoid hitting rate limits too quickly
-        if workers > 1:
-            logger.warning("Forcing --workers=1 due to missing GITHUB_TOKEN")
-            workers = 1
-
-    # Check and display rate limit status
-    rate_info = quota_manager.initialize(token)
-    if rate_info:
-        remaining = rate_info.get("remaining", "unknown")
-        limit = rate_info.get("limit", "unknown")
-        reset_timestamp = rate_info.get("reset", 0)
-
-        if reset_timestamp:
-            reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
-            now = datetime.now(timezone.utc)
-            time_until_reset = reset_time - now
-            minutes_until_reset = time_until_reset.total_seconds() / 60
-            reset_str = f"{minutes_until_reset:.1f} minutes"
-        else:
-            reset_str = "unknown"
-
-        logger.info(
-            "Rate limit: %s/%s remaining (resets in %s)",
-            remaining,
-            limit,
-            reset_str,
-        )
-
-    # Handle init mode
-    if args.init:
-        owner = args.owner
-        repos_to_init = []
-
-        # If repo specified, just use that one
-        if args.repo:
-            repos_to_init = [args.repo]
-            logger.info("Initializing single repository: %s/%s", owner, args.repo)
-        else:
-            # List all repos for owner
-            logger.info("Listing all repositories for owner: %s", owner)
-            try:
-                repos_to_init = github_client.list_repos(owner)
-                logger.info("Found %d repositories for %s", len(repos_to_init), owner)
-            except GitHubAPIError as e:
-                logger.error("Failed to list repositories for %s: %s", owner, e)
-                return 1
-
-        if not repos_to_init:
-            logger.error("No repositories found for owner: %s", owner)
-            return 1
-
-        # Parse start date (required for --init)
-        start_date = parse_timestamp(args.start)
-        logger.info("Using start date: %s", start_date.isoformat())
-
-        # Filter out already-tracked repos to get accurate count
-        repos_needing_validation = []
-        already_tracked_count = 0
-        for repo in repos_to_init:
-            if state_manager.get_repo_state(owner, repo):
-                already_tracked_count += 1
-            else:
-                repos_needing_validation.append(repo)
-
-        if already_tracked_count > 0:
-            logger.info(
-                "%d repositories already tracked, %d need initialization",
-                already_tracked_count,
-                len(repos_needing_validation),
-            )
-
-        # Initialize repos without validation (errors will appear during actual processing)
-        successful = 0
-        skipped = 0
-
-        for repo in repos_to_init:
-            # Check if already tracked
-            existing_state = state_manager.get_repo_state(owner, repo)
-            if existing_state:
-                logger.info(
-                    "[%s/%s] Already tracked (last update: %s), skipping",
-                    owner,
-                    repo,
-                    existing_state["timestamp"].isoformat(),
-                )
-                skipped += 1
-                continue
-
-            # Expand output pattern
-            output_pattern = args.output or config.output_pattern
-            csv_file = expand_output_pattern(output_pattern, owner, repo)
-
-            # Create parent directory if needed
-            csv_path = Path(csv_file)
-            if csv_path.parent and not csv_path.parent.exists():
-                logger.info("Creating directory: %s", csv_path.parent)
-                csv_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Update state file (CSV will be created on first update with actual data)
-            state_manager.update_repo(owner, repo, start_date, csv_file)
-            logger.info(
-                "[%s/%s] Initialized (start date: %s)",
-                owner,
-                repo,
-                start_date.isoformat(),
-            )
-            successful += 1
-
-        # Summary
-        logger.info("=" * 80)
-        logger.info("Initialization complete:")
-        logger.info("  Initialized: %d", successful)
-        logger.info("  Skipped (already tracked): %d", skipped)
-        return 0
-
-    # Handle update-all mode
-    if args.update_all:
-        # Process all repos - reload state and restart on any failure
-        while True:
-            # CRITICAL: Reload state file on each iteration to get updated timestamps
-            try:
-                tracked_repos = state_manager.get_all_tracked_repos()
-            except Exception as e:
-                logger.error("Failed to load state file: %s", e)
-                return 1
-
-            if not tracked_repos:
-                logger.error(
-                    "No tracked repositories found in state file. "
-                    "Run without --update-all first to track repositories."
-                )
-                return 1
-
-            # Sort repositories by timestamp (oldest first)
-            tracked_repos.sort(key=lambda r: r["timestamp"])
-
-            logger.info("Updating %d tracked repositories", len(tracked_repos))
-
-            # Check quota before starting update-all
-            max_prs = quota_manager.calculate_max_prs()
-            if max_prs == 0:
-                remaining, limit, _ = quota_manager.get_current_quota()
-                logger.error(
-                    "Cannot start update-all: quota exhausted or below reserve (%d/%d remaining)",
-                    remaining,
-                    limit,
-                )
-                if args.wait:
-                    # Show progress summary before waiting
-                    show_update_all_progress_summary(tracked_repos, 0)
-                    logger.info("Will wait for quota reset, then start processing")
-
-                    if not quota_manager.wait_for_reset(logger):
-                        return 1
-                    # After waiting, refresh quota and reload state
-                    quota_manager.initialize(token)
-                    max_prs = quota_manager.calculate_max_prs()
-                    if max_prs == 0:
-                        logger.error("Quota still exhausted after reset, aborting")
-                        return 1
-                    logger.info("Resuming update-all with refreshed quota")
-                    continue  # Restart loop to reload state
-                else:
-                    logger.error("Use --wait to automatically wait for reset, or try again later")
-                    return 1
-
-            logger.info("Quota check: can process up to ~%d PRs total across all repos", max_prs)
-
-            completed_repos = 0
-            failed_repo = None
-
-            for repo_info in tracked_repos:
-                owner = repo_info["owner"]
-                repo = repo_info["repo"]
-                csv_file = repo_info["csv_file"]
-                last_update = repo_info["timestamp"]
-
-                if not csv_file:
-                    logger.warning("Skipping %s/%s: no CSV file stored in state", owner, repo)
-                    continue
-
-                logger.info("=" * 80)
-
-                start_date = last_update
-                end_date = datetime.now(timezone.utc)
-
-                exit_code, chunks_done, chunks_fetched = process_repository(
-                    owner,
-                    repo,
-                    csv_file,
-                    start_date,
-                    end_date,
-                    token,
-                    workers,
-                    config,
-                    merge_mode=True,
-                )
-
-                if exit_code == 0:
-                    completed_repos += 1
-                else:
-                    # Repo partially processed - record and stop this pass
-                    failed_repo = f"{owner}/{repo}"
-                    logger.warning(
-                        "Partially processed %s (%d chunks completed, quota exhausted)",
-                        failed_repo,
-                        chunks_done,
-                    )
-                    break
-
-            # Check if we completed all repos
-            if failed_repo is None:
-                logger.info("=" * 80)
-                logger.info("Successfully processed all %d repositories", completed_repos)
-                return 0
-
-            # Failed at least one repo
-            if args.wait:
-                # Show progress summary before waiting
-                show_update_all_progress_summary(tracked_repos, completed_repos, failed_repo)
-                logger.info("Will wait for quota reset, then restart from beginning")
-
-                if not quota_manager.wait_for_reset(logger):
-                    logger.error("Failed to wait for quota reset, aborting")
-                    return 1
-                # Refresh quota and restart from beginning
-                quota_manager.initialize(token)
-                logger.info("Quota refreshed, restarting update-all from beginning")
-                continue  # Restart while loop
-            else:
-                logger.error(
-                    "Incomplete: processed %d repos, stopped at %s (quota exhausted). "
-                    "Use --wait to retry from beginning, or run again later.",
-                    completed_repos,
-                    failed_repo,
-                )
-                return 1
-
-    # Get repository info
-    owner = args.owner
-    repo = args.repo
-
-    if not owner or not repo:
-        detected_owner, detected_repo = get_repo_from_git()
-        owner = owner or detected_owner
-        repo = repo or detected_repo
-
-    if not owner or not repo:
-        logger.error(
-            "Could not determine repository. "
-            "Use --owner and --repo or run from a git repository."
-        )
-        return 1
-
-    # Handle update mode for specific repo
-    if args.update:
-        if not owner or not repo:
-            logger.error("--update requires --owner and --repo to be specified")
-            return 1
-
-        try:
-            repo_state = state_manager.get_repo_state(owner, repo)
-        except ValueError as e:
-            logger.error("State file validation failed: %s", e)
-            return 1
-
-        if not repo_state:
-            logger.error(
-                "Repository %s/%s not found in state file. "
-                "Run without --update first to track this repository.",
-                owner,
-                repo,
-            )
-            return 1
-
-        csv_file = repo_state["csv_file"]
-        start_date = repo_state["timestamp"]
-        end_date = datetime.now(timezone.utc)
-
-        exit_code, _, _ = process_repository(
-            owner,
-            repo,
-            csv_file,
-            start_date,
-            end_date,
-            token,
-            workers,
-            config,
-            merge_mode=True,
-        )
-        return exit_code
-
-    # Handle single PR update mode
-    if args.pr:
-        output_pattern = args.output or config.output_pattern
-        output_file = expand_output_pattern(output_pattern, owner, repo)
-        exit_code = update_single_pr(owner, repo, args.pr, output_file, token, config)
-        return exit_code
-
-    # Regular mode (non-update)
-    output_pattern = args.output or config.output_pattern
-    if not output_pattern:
-        output_file = None  # stdout
-    else:
-        # Expand output pattern with owner/repo placeholders
-        output_file = expand_output_pattern(output_pattern, owner, repo)
-
-    # Get time range from args (--start is required, validated above)
-    end_date = parse_timestamp(args.end) if args.end else datetime.now(timezone.utc)
-    start_date = parse_timestamp(args.start)
-
-    if start_date >= end_date:
-        logger.error("Start date must be before end date")
-        return 1
-
-    # Only store state if output_file is specified (not stdout)
-    if output_file:
-        # Create parent directory if needed
-        output_path = Path(output_file)
-        if output_path.parent and not output_path.parent.exists():
-            logger.info("Creating directory: %s", output_path.parent)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        exit_code, _, _ = process_repository(
-            owner, repo, output_file, start_date, end_date, token, workers, config
-        )
-        return exit_code
-    else:
-        # stdout mode - fetch all PRs then process (no state tracking)
-        # Create PRFetcher and MetricsGenerator instances
-        pr_fetcher = PRFetcher(github_client, quota_manager, config, logger, state_manager)
-        metrics_generator = MetricsGenerator(config, logger)
-
-        try:
-            all_prs = pr_fetcher.fetch_pr_list(owner, repo, start_date, end_date)
-
-            if not all_prs:
-                logger.warning("No pull requests found in the specified date range")
-                return 0
-
-            metrics = []
-            total_prs = len(all_prs)
-            completed = 0
-
-            logger.info("Processing %d PRs with %d workers", total_prs, workers)
-
-            # Process PRs in parallel
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                future_to_pr = {
-                    executor.submit(
-                        fetch_and_process_pr,
-                        pr,
-                        owner,
-                        repo,
-                        token,
-                        config,
-                        pr_fetcher,
-                        metrics_generator,
-                    ): pr
-                    for pr in all_prs
-                }
-
-                for future in as_completed(future_to_pr):
-                    pr = future_to_pr[future]
-                    completed += 1
-                    try:
-                        pr_metrics = future.result()
-                        metrics.append(pr_metrics)
-
-                        logger.info(
-                            "Completed PR %d/%d: #%d (updated: %s)",
-                            completed,
-                            total_prs,
-                            pr["number"],
-                            pr.get("updated_at", "unknown"),
-                        )
-                    except Exception as e:
-                        logger.error("Failed to process PR #%d: %s", pr["number"], e)
-
-            csv_manager.write_csv(metrics, None, merge_mode=False)
-            logger.info("Successfully processed %d pull requests", len(metrics))
-            return 0
-
-        except GitHubAPIError as e:
-            logger.error("GitHub API error: %s", e)
-            return 1
-        except Exception as e:
-            logger.error("Unexpected error: %s", e, exc_info=args.debug)
-            return 1
 
 
 # ============================================================================
@@ -2666,5 +726,62 @@ def expand_output_pattern(pattern: str, owner: str, repo: str) -> str:
     return pattern.replace("{owner}", owner).replace("{repo}", repo)
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+# ============================================================================
+# New Main Entry Point - Subcommand Architecture
+# ============================================================================
+
+
+def parse_arguments() -> tuple[str, argparse.Namespace]:
+    """
+    Parse command-line arguments with subcommand support.
+
+    Returns:
+        Tuple of (command_name, parsed_args)
+    """
+    parser = argparse.ArgumentParser(
+        description="GitHub Pull Request Metrics Tool",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # Global arguments
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging",
+    )
+    parser.add_argument(
+        "--config",
+        default=".gh-pr-metrics.yaml",
+        help="Configuration file path (default: .gh-pr-metrics.yaml)",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version="gh-pr-metrics 0.1.0",
+    )
+
+    # Subcommands
+    subparsers = parser.add_subparsers(dest="command", required=True, help="Command to execute")
+
+    # Import commands
+    from commands import InitCommand, FetchCommand, CsvCommand
+
+    # Init command
+    init_parser = subparsers.add_parser("init", help="Initialize repository tracking")
+    init_cmd = InitCommand()
+    init_cmd.add_arguments(init_parser)
+
+    # Fetch command
+    fetch_parser = subparsers.add_parser("fetch", help="Fetch PR data from GitHub")
+    fetch_cmd = FetchCommand()
+    fetch_cmd.add_arguments(fetch_parser)
+
+    # CSV command
+    csv_parser = subparsers.add_parser("csv", help="Generate CSV from cached JSON")
+    csv_cmd = CsvCommand()
+    csv_cmd.add_arguments(csv_parser)
+
+    # Parse arguments
+    args = parser.parse_args()
+
+    return args.command, args

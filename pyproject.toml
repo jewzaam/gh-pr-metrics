@@ -72,3 +72,20 @@ python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 
+[tool.coverage.run]
+omit = [
+    "src/gh_pr_metrics_old.py",
+    "*/tests/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]
+

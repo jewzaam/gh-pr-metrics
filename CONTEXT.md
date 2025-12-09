@@ -19,24 +19,46 @@ This project implements a command-line tool that generates CSV reports containin
 
 ## Architecture Overview
 
-### Component Structure
+### Component Structure (Current State: Refactored to Subcommand Architecture)
+
 ```
 gh-pr-metrics/
-├── src/                      # Source code directory
-│   └── gh_pr_metrics.py     # Main application (single file implementation)
+├── src/                      # Source code directory (modular OOP architecture)
+│   ├── gh_pr_metrics.py     # Main CLI entry point and command dispatcher (~200 lines)
+│   ├── gh_pr_metrics_old.py # Original monolithic implementation (reference only, not in coverage)
+│   ├── github_api.py         # GitHub API client (unchanged)
+│   ├── managers/             # Independent manager modules
+│   │   ├── __init__.py
+│   │   ├── config_manager.py    # Configuration management
+│   │   ├── state_manager.py     # State file operations
+│   │   ├── quota_manager.py     # API rate limit tracking
+│   │   ├── csv_manager.py       # CSV file I/O
+│   │   └── logging_manager.py   # Logging with quota prefix
+│   ├── data/                 # Data processing modules
+│   │   ├── __init__.py
+│   │   ├── pr_fetcher.py        # PR data fetching from GitHub
+│   │   └── metrics_generator.py # Metrics calculation from JSON
+│   └── commands/             # Command modules (OOP subcommands)
+│       ├── __init__.py
+│       ├── base_command.py      # Abstract base class for commands
+│       ├── init_command.py      # Initialize repository tracking
+│       ├── fetch_command.py     # Fetch PR data from GitHub → JSON
+│       └── csv_command.py       # Generate CSV from JSON cache
 ├── tests/                    # Test suite
 │   ├── unit/                 # Unit tests (100% mocked)
-│   │   ├── test_argument_parsing.py
-│   │   ├── test_csv_output.py
-│   │   ├── test_date_handling.py
-│   │   ├── test_github_api.py
-│   │   ├── test_main.py
-│   │   ├── test_pr_processing.py
-│   │   └── test_repo_detection.py
-│   └── integration/          # Integration tests (placeholder for future)
+│   │   ├── test_commands/   # Command-specific tests
+│   │   ├── test_managers/   # Manager tests
+│   │   ├── test_data/       # Data processor tests
+│   │   └── [existing test files updated for new imports]
+│   └── integration/          # Integration tests
+│       └── test_init_fetch_csv_pipeline.py  # Full workflow test
 ├── docs/                     # Documentation
 │   ├── requirements.md       # Detailed functional/non-functional requirements
-│   └── unit-test-plan.md     # Comprehensive testing strategy
+│   ├── unit-test-plan.md     # Comprehensive testing strategy
+│   └── refactor/             # Refactor documentation
+│       ├── SUBCOMMAND_REFACTOR_PLAN.md  # Refactor implementation plan
+│       ├── ARCHITECTURE.md              # Dependency diagram and architecture details
+│       └── MIGRATION_GUIDE.md           # Old CLI → New CLI mapping
 ├── make/                     # Modular Makefile structure
 │   ├── common.mk            # Common variables and constants
 │   ├── env.mk               # Environment setup targets
@@ -53,13 +75,18 @@ gh-pr-metrics/
 
 ### Implementation Details
 
-**Single File Design**: The entire application is implemented in `src/gh_pr_metrics.py` (498 lines) for simplicity and ease of deployment. This decision was made to prioritize quick deployment over architectural complexity.
+**Refactored Architecture**: The application has been refactored from a 2700-line monolithic file into a clean object-oriented architecture with three independent commands and proper separation of concerns.
+
+**Three Commands**:
+- `gh-pr-metrics init`: Initialize repository tracking
+- `gh-pr-metrics fetch`: Fetch PR data from GitHub and cache as JSON
+- `gh-pr-metrics csv`: Generate CSV metrics from JSON cache
 
 **Version**: 0.1.0 (semantic versioning)
 
 **Python Support**: Python 3.10, 3.11, 3.12
 
-**Test Coverage**: 76% (threshold: 70%, 102 unit tests passing)
+**Test Coverage**: >80% target (257+ tests, old reference code excluded from coverage)
 
 ### Data Flow
 1. **Input**: User provides repository info and time range via CLI

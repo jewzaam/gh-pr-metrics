@@ -5,6 +5,7 @@ import pytest
 from datetime import datetime, timezone, timedelta
 
 import gh_pr_metrics
+from github_api import GitHubClient
 
 
 class TestGitHubClient:
@@ -12,12 +13,12 @@ class TestGitHubClient:
 
     def test_initialization(self):
         """Test GitHubClient initializes with token."""
-        client = gh_pr_metrics.GitHubClient("test_token")
+        client = GitHubClient("test_token")
         assert client._token == "test_token"
 
     def test_initialization_without_token(self):
         """Test GitHubClient initializes without token."""
-        client = gh_pr_metrics.GitHubClient()
+        client = GitHubClient()
         assert client._token is None
 
     def test_make_request_success(self, requests_mock):
@@ -25,7 +26,7 @@ class TestGitHubClient:
         url = "https://api.github.com/repos/owner/repo"
         requests_mock.get(url, json={"name": "repo"})
 
-        client = gh_pr_metrics.GitHubClient()
+        client = GitHubClient()
         result = client.make_request(url)
 
         assert result["name"] == "repo"
@@ -35,7 +36,7 @@ class TestGitHubClient:
         url = "https://api.github.com/repos/owner/repo"
         requests_mock.get(url, json={"name": "repo"})
 
-        client = gh_pr_metrics.GitHubClient("test_token")
+        client = GitHubClient("test_token")
         client.make_request(url)
 
         assert "Authorization" in requests_mock.last_request.headers
@@ -55,7 +56,7 @@ class TestGitHubClient:
         )
 
         # Create client with quota_manager
-        client = gh_pr_metrics.GitHubClient(quota_manager=gh_pr_metrics.quota_manager)
+        client = GitHubClient(quota_manager=gh_pr_metrics.quota_manager)
         client.make_request(url)
 
         remaining, limit, reset = gh_pr_metrics.quota_manager.get_current_quota()
@@ -76,7 +77,7 @@ class TestGitHubClient:
             },
         )
 
-        client = gh_pr_metrics.GitHubClient()
+        client = GitHubClient()
         with pytest.raises(gh_pr_metrics.GitHubAPIError, match="rate limit exceeded"):
             client.make_request(url)
 
@@ -85,7 +86,7 @@ class TestGitHubClient:
         url = "https://api.github.com/repos/owner/repo"
         requests_mock.get(url, status_code=404)
 
-        client = gh_pr_metrics.GitHubClient()
+        client = GitHubClient()
         with pytest.raises(gh_pr_metrics.GitHubAPIError, match="not found"):
             client.make_request(url)
 
@@ -111,7 +112,7 @@ class TestGitHubClient:
         ]
         requests_mock.get(url, json=prs_data)
 
-        client = gh_pr_metrics.GitHubClient()
+        client = GitHubClient()
         result = client.fetch_all_prs("owner", "repo", start_date, end_date)
 
         # Function returns PRs in ascending order (oldest first)
@@ -127,7 +128,7 @@ class TestGitHubClient:
             json=[{"name": "repo1"}, {"name": "repo2"}, {"name": "repo3"}],
         )
 
-        client = gh_pr_metrics.GitHubClient()
+        client = GitHubClient()
         repos = client.list_repos("testowner")
 
         assert repos == ["repo1", "repo2", "repo3"]
@@ -137,7 +138,7 @@ class TestGitHubClient:
         url = "https://api.github.com/repos/owner/repo"
         requests_mock.get(url, json={"name": "repo"})
 
-        client = gh_pr_metrics.GitHubClient()
+        client = GitHubClient()
         result = client.validate_repo_access("owner", "repo")
 
         assert result is True
@@ -147,7 +148,7 @@ class TestGitHubClient:
         url = "https://api.github.com/repos/owner/repo"
         requests_mock.get(url, status_code=404)
 
-        client = gh_pr_metrics.GitHubClient()
+        client = GitHubClient()
         result = client.validate_repo_access("owner", "repo")
 
         assert result is False
@@ -160,7 +161,7 @@ class TestGitHubClient:
         ]
         requests_mock.get(url, json=events_data)
 
-        client = gh_pr_metrics.GitHubClient()
+        client = GitHubClient()
         events = client.fetch_timeline_events("owner", "repo", 123)
 
         assert len(events) == 1
@@ -172,7 +173,7 @@ class TestGitHubClient:
         comments_data = [{"id": 1, "body": "Comment 1"}]
         requests_mock.get(url, json=comments_data)
 
-        client = gh_pr_metrics.GitHubClient()
+        client = GitHubClient()
         comments = client.fetch_issue_comments(url)
 
         assert len(comments) == 1
@@ -184,7 +185,7 @@ class TestGitHubClient:
         comments_data = [{"id": 1, "body": "Review comment"}]
         requests_mock.get(url, json=comments_data)
 
-        client = gh_pr_metrics.GitHubClient()
+        client = GitHubClient()
         comments = client.fetch_review_comments(url)
 
         assert len(comments) == 1
@@ -196,7 +197,7 @@ class TestGitHubClient:
         reviews_data = [{"id": 1, "state": "APPROVED"}]
         requests_mock.get(url, json=reviews_data)
 
-        client = gh_pr_metrics.GitHubClient()
+        client = GitHubClient()
         reviews = client.fetch_reviews("owner", "repo", 123)
 
         assert len(reviews) == 1
@@ -235,9 +236,7 @@ class TestGitHubClient:
             headers={"Link": ""},
         )
 
-        client = gh_pr_metrics.GitHubClient(
-            "test_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
-        )
+        client = GitHubClient("test_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger)
         prs = client.fetch_all_prs("owner", "repo", start_date, end_date)
 
         # Should return 2 PRs in ascending order (oldest first) and stop at PR 200
@@ -278,9 +277,7 @@ class TestGitHubClient:
             headers={"Link": ""},
         )
 
-        client = gh_pr_metrics.GitHubClient(
-            "test_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
-        )
+        client = GitHubClient("test_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger)
         prs = client.fetch_all_prs("owner", "repo", start_date, end_date)
 
         # Should skip 400, 300, return 200, stop at 100
@@ -323,9 +320,7 @@ class TestGitHubClient:
             headers={"Link": ""},
         )
 
-        client = gh_pr_metrics.GitHubClient(
-            "test_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
-        )
+        client = GitHubClient("test_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger)
         prs = client.fetch_all_prs("owner", "repo", start_date, end_date)
 
         # Should return 3 PRs in ascending order (oldest first)

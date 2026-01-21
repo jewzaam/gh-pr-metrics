@@ -196,7 +196,8 @@ class TestMain:
             with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
                 with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
                     result = gh_pr_metrics.main()
-                    assert result == 1  # Returns failure due to partial failure
+                    # Now returns EXIT_CODE_SUCCESS because repo access errors are skipped
+                    assert result == gh_pr_metrics.EXIT_CODE_SUCCESS
 
     def test_main_update_all_skips_repo_without_csv(self, tmp_path, requests_mock, default_config):
         """Test --update-all skips repos without CSV file in state."""

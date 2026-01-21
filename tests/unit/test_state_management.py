@@ -300,14 +300,25 @@ class TestStateManagement:
         self, tmp_path, requests_mock, default_config
     ):
         """
-        Test that process_repository doesn't hit UnboundLocalError when
-        error occurs during collection phase.
+        Test that process_repository handles repo access errors correctly.
+
+        Verifies:
+        1. Returns EXIT_CODE_ERROR_REPO_ACCESS for 404/permission errors
+        2. Does NOT update state file timestamp (critical - prevents marking as "processed")
         """
         state_file = tmp_path / "state.yaml"
         output_file = tmp_path / "output.csv"
 
         start_date = datetime(2025, 8, 1, 0, 0, 0, tzinfo=timezone.utc)
         end_date = datetime(2025, 11, 25, 0, 0, 0, tzinfo=timezone.utc)
+
+        # Create initial state with a known timestamp
+        initial_timestamp = "2025-07-01T00:00:00"
+        state_file.write_text(
+            f"https://github.com/testowner/testrepo:\n"
+            f"  csv_file: {output_file}\n"
+            f"  timestamp: '{initial_timestamp}'\n"
+        )
 
         # Mock request that will fail (404 error)
         requests_mock.get("https://api.github.com/repos/testowner/testrepo/pulls", status_code=404)
@@ -334,10 +345,20 @@ class TestStateManagement:
                 merge_mode=False,
             )
 
-            # Should fail gracefully without UnboundLocalError
-            assert exit_code == 1
+            # Should fail with EXIT_CODE_ERROR_REPO_ACCESS (repo access error, not quota)
+            assert exit_code == gh_pr_metrics.EXIT_CODE_ERROR_REPO_ACCESS
             assert chunks_completed == 0  # Initialized to 0
             assert total_chunks_fetched == 0  # Error before fetch completed
+
+            # CRITICAL: State file timestamp must NOT be updated for access errors
+            # If we update it, we'll never try to fetch this repo again
+            state = gh_pr_metrics.state_manager.load()
+            repo_key = "https://github.com/testowner/testrepo"
+            assert repo_key in state
+            assert state[repo_key]["timestamp"] == initial_timestamp, (
+                "State file timestamp should NOT be updated on repo access errors. "
+                f"Expected: {initial_timestamp}, Got: {state[repo_key]['timestamp']}"
+            )
 
     def test_mark_pr_failed_new_repo(self, tmp_path):
         """Test marking a PR as failed for a repo not in state."""

@@ -46,9 +46,9 @@ env/
 Thumbs.db
 
 # Local data (csv)
-data/
-data-backup/
-pr-analysis/
+/data/
+/data-backup/
+/pr-analysis/
 .gh-pr-metrics.yaml
 *.csv
 

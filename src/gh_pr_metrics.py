@@ -43,6 +43,11 @@ from github_api import (
 # Version
 __version__ = "0.1.0"
 
+# Exit codes
+EXIT_CODE_SUCCESS = 0  # Successful completion
+EXIT_CODE_ERROR_QUOTA = 1  # Quota exhausted or other critical error requiring retry/wait
+EXIT_CODE_ERROR_REPO_ACCESS = 2  # Repo not found or insufficient permissions (skip and continue)
+
 # Constants
 DEFAULT_WORKERS = 4
 DEFAULT_RAW_DATA_DIR = "data/raw"
@@ -1400,7 +1405,7 @@ def get_review_metrics(
             reviews = github_client.fetch_reviews(owner, repo, pr["number"])
         except GitHubAPIError as e:
             logger.debug("Failed to fetch reviews for PR #%d: %s", pr["number"], e)
-            return 0, 0, 0
+            return EXIT_CODE_SUCCESS, 0, 0
 
     # Count total change requests
     changes_requested_count = sum(1 for r in reviews if r.get("state") == "CHANGES_REQUESTED")
@@ -1740,7 +1745,7 @@ def update_single_pr(
     """
     Update a single PR in an existing CSV file.
 
-    Returns 0 on success, 1 on error.
+    Returns EXIT_CODE_SUCCESS on success, EXIT_CODE_ERROR_QUOTA on error.
     """
     logger.info("Fetching PR #%d from %s/%s", pr_number, owner, repo)
 
@@ -1748,7 +1753,7 @@ def update_single_pr(
         pr = github_client.fetch_single_pr(owner, repo, pr_number)
     except GitHubAPIError as e:
         logger.error("Failed to fetch PR #%d: %s", pr_number, e)
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     logger.info("Processing PR #%d", pr_number)
     try:
@@ -1760,13 +1765,13 @@ def update_single_pr(
         )
     except Exception as e:
         logger.error("Failed to process PR #%d: %s", pr_number, e)
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     # Read existing CSV
     if not Path(output_file).exists():
         logger.error("CSV file not found: %s", output_file)
         logger.error("Use regular mode first to create the CSV file")
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     # Read existing CSV as dict keyed by PR number
     logger.info("Reading existing CSV: %s", output_file)
@@ -1786,7 +1791,7 @@ def update_single_pr(
     csv_manager.write_csv(all_metrics, output_file, merge_mode=False)
 
     logger.info("Successfully updated PR #%d", pr_number)
-    return 0
+    return EXIT_CODE_SUCCESS
 
 
 def process_repository(
@@ -1845,7 +1850,7 @@ def process_repository(
             limit,
         )
         # Note: per-repo wait not implemented, only at update-all level
-        return 1, 0, 0
+        return EXIT_CODE_ERROR_QUOTA, 0, 0
 
     logger.info(
         "[%s] Quota check: can process up to ~%d PRs before hitting reserve",
@@ -1887,7 +1892,7 @@ def process_repository(
         if not all_prs:
             logger.info("[%s] No pull requests found in the specified date range", repo_ctx)
             state_manager.update_repo(owner, repo, end_date, output_file)
-            return 0, 1, 0
+            return EXIT_CODE_SUCCESS, 1, 0
 
         logger.info("[%s] Collected %d PRs total", repo_ctx, len(all_prs))
         # Estimate chunks fetched (for return value compatibility)
@@ -1940,7 +1945,7 @@ def process_repository(
                         "after rate limit resets.",
                         repo_ctx,
                     )
-                    return 1, chunks_completed, total_chunks_fetched
+                    return EXIT_CODE_ERROR_QUOTA, chunks_completed, total_chunks_fetched
 
             # Process this chunk of PRs
             metrics = []
@@ -2031,18 +2036,26 @@ def process_repository(
                     chunks_completed,
                     total_chunks_fetched,
                 )
-                return 1, chunks_completed, total_chunks_fetched
+                return EXIT_CODE_ERROR_QUOTA, chunks_completed, total_chunks_fetched
 
     except GitHubAPIError as e:
-        logger.error("[%s] GitHub API error: %s", repo_ctx, e)
-        return 1, chunks_completed, total_chunks_fetched
+        error_msg = str(e)
+        logger.error("[%s] GitHub API error: %s", repo_ctx, error_msg)
+
+        # Return EXIT_CODE_ERROR_REPO_ACCESS for repo access errors (not found, permissions)
+        # These should not stop update-all processing
+        if "not found" in error_msg.lower() or "insufficient permissions" in error_msg.lower():
+            return EXIT_CODE_ERROR_REPO_ACCESS, chunks_completed, total_chunks_fetched
+
+        # Other API errors (rate limit, network) should stop processing
+        return EXIT_CODE_ERROR_QUOTA, chunks_completed, total_chunks_fetched
     except Exception as e:
         logger.error("[%s] Unexpected error: %s", repo_ctx, e, exc_info=True)
-        return 1, chunks_completed, total_chunks_fetched
+        return EXIT_CODE_ERROR_QUOTA, chunks_completed, total_chunks_fetched
 
     # Successfully completed all chunks
     logger.info("[%s] Successfully completed all %d chunks", repo_ctx, chunks_completed)
-    return 0, chunks_completed, total_chunks_fetched
+    return EXIT_CODE_SUCCESS, chunks_completed, total_chunks_fetched
 
 
 def main() -> int:
@@ -2055,7 +2068,7 @@ def main() -> int:
     except ValueError as e:
         print(f"Error loading configuration: {e}", file=sys.stderr)
         print(f"Configuration file: {args.config}", file=sys.stderr)
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     setup_logging(args.debug, config.log_file)
 
@@ -2075,71 +2088,71 @@ def main() -> int:
     # Validate argument combinations
     if args.init and not args.owner:
         logger.error("--init requires --owner")
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     if args.init and not (args.output or config.output_pattern):
         logger.error(
             "--init requires --output or output_pattern in config "
             "(supports patterns like 'data/{owner}-{repo}.csv')"
         )
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     if args.init and not args.start:
         logger.error("--init requires --start to specify the starting date")
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     if args.init and args.end:
         logger.error("--init cannot be used with --end (uses current time)")
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     if args.init and (args.update or args.update_all):
         logger.error("--init cannot be used with --update or --update-all")
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     if args.update and args.output:
         logger.error("--update and --output cannot be used together (update uses stored CSV path)")
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     if args.update and (args.start or args.end):
         logger.error(
             "--update cannot be used with --start or --end (uses last update date from state)"
         )
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     if args.update_all and args.output:
         logger.error("--update-all and --output cannot be used together (uses stored CSV paths)")
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     if args.update_all and (args.start or args.end):
         logger.error(
             "--update-all cannot be used with --start or --end (uses last update dates from state)"
         )
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     if args.update_all and (args.owner or args.repo):
         logger.error("--update-all cannot be used with --owner or --repo")
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     if args.update and args.update_all:
         logger.error("--update and --update-all cannot be used together")
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     if args.wait and not args.update_all:
         logger.error("--wait can only be used with --update-all")
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     if args.pr and (args.init or args.update or args.update_all):
         logger.error("--pr cannot be used with --init, --update, or --update-all")
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     if args.pr and not args.output and not config.output_pattern:
         logger.error("--pr requires --output or config output_pattern to specify the CSV file")
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     # Regular mode requires --start (update modes use state file timestamps)
     if not (args.init or args.update or args.update_all or args.pr) and not args.start:
         logger.error("--start is required to specify the starting date")
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     # Get GitHub token and initialize client
     token = get_github_token()
@@ -2199,11 +2212,11 @@ def main() -> int:
                 logger.info("Found %d repositories for %s", len(repos_to_init), owner)
             except GitHubAPIError as e:
                 logger.error("Failed to list repositories for %s: %s", owner, e)
-                return 1
+                return EXIT_CODE_ERROR_QUOTA
 
         if not repos_to_init:
             logger.error("No repositories found for owner: %s", owner)
-            return 1
+            return EXIT_CODE_ERROR_QUOTA
 
         # Parse start date (required for --init)
         start_date = parse_timestamp(args.start)
@@ -2267,7 +2280,7 @@ def main() -> int:
         logger.info("Initialization complete:")
         logger.info("  Initialized: %d", successful)
         logger.info("  Skipped (already tracked): %d", skipped)
-        return 0
+        return EXIT_CODE_SUCCESS
 
     # Handle update-all mode
     if args.update_all:
@@ -2278,14 +2291,14 @@ def main() -> int:
                 tracked_repos = state_manager.get_all_tracked_repos()
             except Exception as e:
                 logger.error("Failed to load state file: %s", e)
-                return 1
+                return EXIT_CODE_ERROR_QUOTA
 
             if not tracked_repos:
                 logger.error(
                     "No tracked repositories found in state file. "
                     "Run without --update-all first to track repositories."
                 )
-                return 1
+                return EXIT_CODE_ERROR_QUOTA
 
             # Sort repositories by timestamp (oldest first)
             tracked_repos.sort(key=lambda r: r["timestamp"])
@@ -2307,18 +2320,18 @@ def main() -> int:
                     logger.info("Will wait for quota reset, then start processing")
 
                     if not quota_manager.wait_for_reset(logger):
-                        return 1
+                        return EXIT_CODE_ERROR_QUOTA
                     # After waiting, refresh quota and reload state
                     quota_manager.initialize(token)
                     max_prs = quota_manager.calculate_max_prs()
                     if max_prs == 0:
                         logger.error("Quota still exhausted after reset, aborting")
-                        return 1
+                        return EXIT_CODE_ERROR_QUOTA
                     logger.info("Resuming update-all with refreshed quota")
                     continue  # Restart loop to reload state
                 else:
                     logger.error("Use --wait to automatically wait for reset, or try again later")
-                    return 1
+                    return EXIT_CODE_ERROR_QUOTA
 
             logger.info("Quota check: can process up to ~%d PRs total across all repos", max_prs)
 
@@ -2352,10 +2365,19 @@ def main() -> int:
                     merge_mode=True,
                 )
 
-                if exit_code == 0:
+                if exit_code == EXIT_CODE_SUCCESS:
                     completed_repos += 1
+                elif exit_code == EXIT_CODE_ERROR_REPO_ACCESS:
+                    # Repo access error (not found, permissions) - skip and continue
+                    logger.warning(
+                        "Skipping %s/%s: repository not accessible "
+                        "(possibly moved, deleted, or insufficient permissions)",
+                        owner,
+                        repo,
+                    )
+                    completed_repos += 1  # Count as completed to avoid reprocessing
                 else:
-                    # Repo partially processed - record and stop this pass
+                    # Quota exhaustion or other critical error - record and stop this pass
                     failed_repo = f"{owner}/{repo}"
                     logger.warning(
                         "Partially processed %s (%d chunks completed, quota exhausted)",
@@ -2368,7 +2390,7 @@ def main() -> int:
             if failed_repo is None:
                 logger.info("=" * 80)
                 logger.info("Successfully processed all %d repositories", completed_repos)
-                return 0
+                return EXIT_CODE_SUCCESS
 
             # Failed at least one repo
             if args.wait:
@@ -2378,7 +2400,7 @@ def main() -> int:
 
                 if not quota_manager.wait_for_reset(logger):
                     logger.error("Failed to wait for quota reset, aborting")
-                    return 1
+                    return EXIT_CODE_ERROR_QUOTA
                 # Refresh quota and restart from beginning
                 quota_manager.initialize(token)
                 logger.info("Quota refreshed, restarting update-all from beginning")
@@ -2390,7 +2412,7 @@ def main() -> int:
                     completed_repos,
                     failed_repo,
                 )
-                return 1
+                return EXIT_CODE_ERROR_QUOTA
 
     # Get repository info
     owner = args.owner
@@ -2406,19 +2428,19 @@ def main() -> int:
             "Could not determine repository. "
             "Use --owner and --repo or run from a git repository."
         )
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     # Handle update mode for specific repo
     if args.update:
         if not owner or not repo:
             logger.error("--update requires --owner and --repo to be specified")
-            return 1
+            return EXIT_CODE_ERROR_QUOTA
 
         try:
             repo_state = state_manager.get_repo_state(owner, repo)
         except ValueError as e:
             logger.error("State file validation failed: %s", e)
-            return 1
+            return EXIT_CODE_ERROR_QUOTA
 
         if not repo_state:
             logger.error(
@@ -2427,7 +2449,7 @@ def main() -> int:
                 owner,
                 repo,
             )
-            return 1
+            return EXIT_CODE_ERROR_QUOTA
 
         csv_file = repo_state["csv_file"]
         start_date = repo_state["timestamp"]
@@ -2467,7 +2489,7 @@ def main() -> int:
 
     if start_date >= end_date:
         logger.error("Start date must be before end date")
-        return 1
+        return EXIT_CODE_ERROR_QUOTA
 
     # Only store state if output_file is specified (not stdout)
     if output_file:
@@ -2492,7 +2514,7 @@ def main() -> int:
 
             if not all_prs:
                 logger.warning("No pull requests found in the specified date range")
-                return 0
+                return EXIT_CODE_SUCCESS
 
             metrics = []
             total_prs = len(all_prs)
@@ -2535,14 +2557,14 @@ def main() -> int:
 
             csv_manager.write_csv(metrics, None, merge_mode=False)
             logger.info("Successfully processed %d pull requests", len(metrics))
-            return 0
+            return EXIT_CODE_SUCCESS
 
         except GitHubAPIError as e:
             logger.error("GitHub API error: %s", e)
-            return 1
+            return EXIT_CODE_ERROR_QUOTA
         except Exception as e:
             logger.error("Unexpected error: %s", e, exc_info=args.debug)
-            return 1
+            return EXIT_CODE_ERROR_QUOTA
 
 
 # ============================================================================

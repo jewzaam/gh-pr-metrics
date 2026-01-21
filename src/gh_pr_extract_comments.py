@@ -31,7 +31,6 @@ from dateutil import parser as date_parser
 
 from github_api import GitHubAPIError, GitHubClient, QuotaManager, API_CALLS_PER_PR
 
-
 # Version
 __version__ = "0.1.0"
 

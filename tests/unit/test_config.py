@@ -41,11 +41,9 @@ class TestConfigLoading:
     def test_load_config_output_pattern_without_placeholders(self, tmp_path):
         """Test that load_config validates output_pattern has placeholders."""
         config_file = tmp_path / "bad_pattern.yaml"
-        config_file.write_text(
-            """
+        config_file.write_text("""
 output_pattern: "static_file.csv"
-"""
-        )
+""")
 
         with pytest.raises(ValueError, match="Invalid output_pattern.*must contain"):
             gh_pr_metrics.load_config(str(config_file))
@@ -53,11 +51,9 @@ output_pattern: "static_file.csv"
     def test_load_config_output_pattern_with_owner_placeholder(self, tmp_path):
         """Test that output_pattern with {owner} is valid."""
         config_file = tmp_path / "valid_owner.yaml"
-        config_file.write_text(
-            """
+        config_file.write_text("""
 output_pattern: "data/{owner}_repos.csv"
-"""
-        )
+""")
 
         config = gh_pr_metrics.load_config(str(config_file))
         assert config.output_pattern == "data/{owner}_repos.csv"
@@ -65,11 +61,9 @@ output_pattern: "data/{owner}_repos.csv"
     def test_load_config_output_pattern_with_repo_placeholder(self, tmp_path):
         """Test that output_pattern with {repo} is valid."""
         config_file = tmp_path / "valid_repo.yaml"
-        config_file.write_text(
-            """
+        config_file.write_text("""
 output_pattern: "data/{repo}.csv"
-"""
-        )
+""")
 
         config = gh_pr_metrics.load_config(str(config_file))
         assert config.output_pattern == "data/{repo}.csv"
@@ -77,8 +71,7 @@ output_pattern: "data/{repo}.csv"
     def test_load_config_valid(self, tmp_path):
         """Test loading a valid configuration file."""
         config_file = tmp_path / "valid.yaml"
-        config_file.write_text(
-            """
+        config_file.write_text("""
 ai_bots:
   always:
     - "cursor\\\\[bot\\\\]"
@@ -89,8 +82,7 @@ ai_bots:
 workers: 8
 log_file: "test.log"
 raw_data_dir: "data/json"
-"""
-        )
+""")
 
         config = gh_pr_metrics.load_config(str(config_file))
 

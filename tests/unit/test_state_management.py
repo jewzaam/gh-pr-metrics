@@ -498,3 +498,205 @@ class TestStateManagement:
             failed_prs = gh_pr_metrics.state_manager.get_failed_prs("owner", "repo")
             assert len(failed_prs) == 20
             assert set(failed_prs) == set(pr_numbers)
+
+    def test_process_repository_retries_failed_prs(self, tmp_path, requests_mock, default_config):
+        """
+        Test that process_repository correctly retries failed PRs from state file.
+
+        Verifies:
+        1. Failed PRs are read from state file
+        2. github_client.fetch_single_pr() is called for each failed PR
+        3. Failed PRs are processed and included in output
+        """
+        state_file = tmp_path / "state.yaml"
+        output_file = tmp_path / "output.csv"
+
+        # Set up state file with failed PRs
+        state_file.write_text(
+            "https://github.com/testowner/testrepo:\n"
+            "  timestamp: '2024-01-01T00:00:00'\n"
+            "  failed_prs:\n"
+            "  - 100\n"
+            "  - 200\n"
+        )
+
+        start_date = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        query_time = datetime(2024, 1, 2, 0, 0, 0, tzinfo=timezone.utc)
+
+        # Mock the main PR list endpoint (returns no new PRs)
+        requests_mock.get(
+            "https://api.github.com/repos/testowner/testrepo/pulls",
+            json=[],
+            headers={"Link": ""},  # No pagination
+        )
+
+        # Mock fetch_single_pr calls for failed PRs
+        for pr_num in [100, 200]:
+            requests_mock.get(
+                f"https://api.github.com/repos/testowner/testrepo/pulls/{pr_num}",
+                json={
+                    "number": pr_num,
+                    "title": f"Failed PR {pr_num}",
+                    "state": "closed",
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "updated_at": "2024-01-01T12:00:00Z",
+                    "closed_at": "2024-01-01T13:00:00Z",
+                    "merged_at": "2024-01-01T13:00:00Z",
+                    "user": {"login": "testuser"},
+                    "head": {"ref": "feature"},
+                    "base": {"ref": "main"},
+                    "html_url": f"https://github.com/testowner/testrepo/pull/{pr_num}",
+                    "draft": False,
+                    "comments_url": (
+                        f"https://api.github.com/repos/testowner/testrepo/"
+                        f"issues/{pr_num}/comments"
+                    ),
+                    "review_comments_url": (
+                        f"https://api.github.com/repos/testowner/testrepo/"
+                        f"pulls/{pr_num}/comments"
+                    ),
+                },
+            )
+
+            # Mock PR details endpoints
+            requests_mock.get(
+                f"https://api.github.com/repos/testowner/testrepo/issues/{pr_num}/timeline", json=[]
+            )
+            requests_mock.get(
+                f"https://api.github.com/repos/testowner/testrepo/issues/{pr_num}/comments", json=[]
+            )
+            requests_mock.get(
+                f"https://api.github.com/repos/testowner/testrepo/pulls/{pr_num}/reviews", json=[]
+            )
+            requests_mock.get(
+                f"https://api.github.com/repos/testowner/testrepo/pulls/{pr_num}/comments", json=[]
+            )
+            requests_mock.get(
+                f"https://api.github.com/repos/testowner/testrepo/pulls/{pr_num}/commits", json=[]
+            )
+
+        # Mock rate limit
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+        )
+
+        # Initialize github_client for the test
+        gh_pr_metrics.github_client = gh_pr_metrics.GitHubClient(
+            "fake-token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
+
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            exit_code, chunks_completed, total_chunks_fetched = process_repository(
+                owner="testowner",
+                repo="testrepo",
+                output_file=str(output_file),
+                start_date=start_date,
+                end_date=query_time,
+                token="fake-token",
+                workers=1,
+                config=default_config,
+                merge_mode=False,
+            )
+
+            # Verify success
+            assert exit_code == gh_pr_metrics.EXIT_CODE_SUCCESS
+            assert chunks_completed == 1
+
+            # Verify output file was created and contains both retried PRs
+            assert output_file.exists()
+            content = output_file.read_text()
+            assert "Failed PR 100" in content
+            assert "Failed PR 200" in content
+
+            # Verify failed PRs were removed from state file (marked as succeeded)
+            state = gh_pr_metrics.state_manager.load()
+            repo_key = "https://github.com/testowner/testrepo"
+            failed_prs = state.get(repo_key, {}).get("failed_prs", [])
+            assert 100 not in failed_prs
+            assert 200 not in failed_prs
+
+            # Verify the fetch_single_pr endpoint was called for each failed PR
+            fetch_100_called = any(
+                req.url == "https://api.github.com/repos/testowner/testrepo/pulls/100"
+                for req in requests_mock.request_history
+            )
+            fetch_200_called = any(
+                req.url == "https://api.github.com/repos/testowner/testrepo/pulls/200"
+                for req in requests_mock.request_history
+            )
+            assert fetch_100_called, "fetch_single_pr should be called for PR #100"
+            assert fetch_200_called, "fetch_single_pr should be called for PR #200"
+
+    def test_process_repository_retries_failed_prs_with_error(
+        self, tmp_path, requests_mock, default_config
+    ):
+        """
+        Test that process_repository handles errors when retrying failed PRs.
+
+        Verifies:
+        1. Failed PRs are attempted to be retried
+        2. API errors during retry are caught and logged
+        3. Processing continues despite retry errors
+        4. Failed PRs remain in state file when retry fails
+        """
+        state_file = tmp_path / "state.yaml"
+        output_file = tmp_path / "output.csv"
+
+        # Set up state file with a failed PR
+        state_file.write_text(
+            "https://github.com/testowner/testrepo:\n"
+            "  timestamp: '2024-01-01T00:00:00'\n"
+            "  failed_prs:\n"
+            "  - 999\n"
+        )
+
+        start_date = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        query_time = datetime(2024, 1, 2, 0, 0, 0, tzinfo=timezone.utc)
+
+        # Mock the main PR list endpoint (returns no new PRs)
+        requests_mock.get(
+            "https://api.github.com/repos/testowner/testrepo/pulls",
+            json=[],
+            headers={"Link": ""},
+        )
+
+        # Mock fetch_single_pr to return 404 (PR not found)
+        requests_mock.get(
+            "https://api.github.com/repos/testowner/testrepo/pulls/999",
+            status_code=404,
+            json={"message": "Not Found"},
+        )
+
+        # Mock rate limit
+        requests_mock.get(
+            "https://api.github.com/rate_limit",
+            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+        )
+
+        # Initialize github_client for the test
+        gh_pr_metrics.github_client = gh_pr_metrics.GitHubClient(
+            "fake-token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
+
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            exit_code, chunks_completed, total_chunks_fetched = process_repository(
+                owner="testowner",
+                repo="testrepo",
+                output_file=str(output_file),
+                start_date=start_date,
+                end_date=query_time,
+                token="fake-token",
+                workers=1,
+                config=default_config,
+                merge_mode=False,
+            )
+
+            # Processing should still succeed even if retry fails
+            assert exit_code == gh_pr_metrics.EXIT_CODE_SUCCESS
+
+            # Verify the failed PR is still in state (retry failed)
+            state = gh_pr_metrics.state_manager.load()
+            repo_key = "https://github.com/testowner/testrepo"
+            failed_prs = state.get(repo_key, {}).get("failed_prs", [])
+            assert 999 in failed_prs, "Failed PR should remain in state when retry fails"

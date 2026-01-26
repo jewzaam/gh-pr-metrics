@@ -1871,7 +1871,7 @@ def process_repository(
             failed_pr_objects = []
             for pr_number in failed_prs:
                 try:
-                    pr = github_client.fetch_pr(owner, repo, pr_number)
+                    pr = github_client.fetch_single_pr(owner, repo, pr_number)
                     failed_pr_objects.append(pr)
                     logger.info("[%s] Added failed PR #%d to retry list", repo_ctx, pr_number)
                 except GitHubAPIError as e:

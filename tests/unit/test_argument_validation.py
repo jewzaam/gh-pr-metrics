@@ -17,12 +17,21 @@ class TestArgumentValidation:
         with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
             yield
 
-    def test_wait_requires_update_all(self):
-        """Test that --wait can only be used with --update-all."""
+    def test_wait_requires_update_mode(self):
+        """Test that --wait requires --update or --update-all."""
         with mock.patch.object(
             sys,
             "argv",
-            ["gh-pr-metrics", "--wait", "--owner", "test", "--repo", "test", "--update"],
+            [
+                "gh-pr-metrics",
+                "--wait",
+                "--owner",
+                "test",
+                "--repo",
+                "test",
+                "--start",
+                "2024-01-01",
+            ],
         ):
             result = gh_pr_metrics.main()
             assert result == 1

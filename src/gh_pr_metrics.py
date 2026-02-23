@@ -2136,8 +2136,8 @@ def main() -> int:
         logger.error("--update and --update-all cannot be used together")
         return EXIT_CODE_ERROR_QUOTA
 
-    if args.wait and not args.update_all:
-        logger.error("--wait can only be used with --update-all")
+    if args.wait and not (args.update or args.update_all):
+        logger.error("--wait can only be used with --update or --update-all")
         return EXIT_CODE_ERROR_QUOTA
 
     if args.pr and (args.init or args.update or args.update_all):
@@ -2451,21 +2451,52 @@ def main() -> int:
             return EXIT_CODE_ERROR_QUOTA
 
         csv_file = repo_state["csv_file"]
-        start_date = repo_state["timestamp"]
-        end_date = datetime.now(timezone.utc)
 
-        exit_code, _, _ = process_repository(
-            owner,
-            repo,
-            csv_file,
-            start_date,
-            end_date,
-            token,
-            workers,
-            config,
-            merge_mode=True,
-        )
-        return exit_code
+        # Retry loop for quota exhaustion with --wait support
+        while True:
+            start_date = repo_state["timestamp"]
+            end_date = datetime.now(timezone.utc)
+
+            exit_code, _, _ = process_repository(
+                owner,
+                repo,
+                csv_file,
+                start_date,
+                end_date,
+                token,
+                workers,
+                config,
+                merge_mode=True,
+            )
+
+            # If successful or error other than quota exhaustion, return
+            if exit_code != EXIT_CODE_ERROR_QUOTA:
+                return exit_code
+
+            # Quota exhausted - check if we should wait and retry
+            if args.wait:
+                logger.info("Will wait for quota reset, then retry")
+                if not quota_manager.wait_for_reset(logger):
+                    logger.error("Failed to wait for quota reset, aborting")
+                    return EXIT_CODE_ERROR_QUOTA
+                # Refresh quota and retry
+                quota_manager.initialize(token)
+                logger.info("Quota refreshed, retrying update")
+                # Reload state in case it was updated by partial progress
+                try:
+                    repo_state = state_manager.get_repo_state(owner, repo)
+                except ValueError as e:
+                    logger.error("State file validation failed: %s", e)
+                    return EXIT_CODE_ERROR_QUOTA
+                continue  # Retry
+            else:
+                logger.error(
+                    "Update incomplete for %s/%s (quota exhausted). "
+                    "Use --wait to retry automatically, or run again later.",
+                    owner,
+                    repo,
+                )
+                return EXIT_CODE_ERROR_QUOTA
 
     # Handle single PR update mode
     if args.pr:

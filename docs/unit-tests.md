@@ -71,7 +71,7 @@ Without these fixtures, tests would:
 **File**: `test_argument_validation.py`
 
 Tests all CLI argument combination rules:
-- `--wait` requires `--update-all`
+- `--wait` requires `--update` or `--update-all`
 - `--update` restrictions (no `--start`, `--end`, `--output`)
 - `--update-all` restrictions (no `--owner`, `--repo`, `--start`, `--end`, `--output`)
 - `--init` requirements
@@ -158,8 +158,8 @@ pytest tests/unit/test_main.py::test_name -vv --log-cli-level=DEBUG
 Example:
 ```python
 class TestArgumentValidation:
-    def test_wait_requires_update_all(self):
-        """Test that --wait can only be used with --update-all."""
+    def test_wait_requires_update_mode(self):
+        """Test that --wait requires --update or --update-all."""
         ...
 ```
 

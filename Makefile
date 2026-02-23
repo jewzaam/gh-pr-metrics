@@ -10,8 +10,10 @@ include make/env.mk
 include make/test.mk
 include make/lint.mk
 
-.DEFAULT_GOAL := help
-.PHONY: help
+.DEFAULT_GOAL := all
+.PHONY: help all
+
+all: test-unit coverage lint format ## Run all checks (default target)
 
 help: ## Display this help message
 	@echo "GitHub Pull Request Metrics Tool"

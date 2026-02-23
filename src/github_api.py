@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Optional
 import requests
 from dateutil import parser as date_parser
 
+from utils import format_timestamp_local
+
 # Constants
 GITHUB_API_BASE = "https://api.github.com"
 API_CALLS_PER_PR = 4  # Estimate: timeline events, reviews, comments, review comments
@@ -157,7 +159,7 @@ class QuotaManager:
 
         wait_minutes = wait_seconds / 60
         log.info(f"Waiting {wait_minutes:.1f} minutes for quota reset...")
-        log.info(f"Will resume at {reset_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        log.info(f"Will resume at {format_timestamp_local(reset_time)}")
 
         time.sleep(wait_seconds)
 

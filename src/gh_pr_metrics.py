@@ -38,6 +38,7 @@ from github_api import (
     QuotaManager,
     API_CALLS_PER_PR,
 )
+from utils import format_timestamp_local
 
 # Version
 __version__ = "0.1.0"
@@ -1985,6 +1986,10 @@ def process_repository(
                         csv_manager.write_csv([pr_metrics], output_file, merge_mode=True)
                         metrics.append(pr_metrics)
 
+                        updated_at = pr.get("updated_at")
+                        updated_str = (
+                            format_timestamp_local(updated_at) if updated_at else "unknown"
+                        )
                         logger.info(
                             "[%s] %s: Completed PR %d/%d: #%d (updated: %s)",
                             repo_ctx,
@@ -1992,7 +1997,7 @@ def process_repository(
                             completed,
                             total_prs,
                             pr_number,
-                            pr.get("updated_at", "unknown"),
+                            updated_str,
                         )
                     except Exception as e:
                         logger.error(
@@ -2023,7 +2028,7 @@ def process_repository(
                 repo_ctx,
                 chunk_info_str,
                 len(metrics),
-                last_processed_timestamp.isoformat(),
+                format_timestamp_local(last_processed_timestamp),
             )
 
             # If quota insufficient and more chunks remain, stop with error
@@ -2575,12 +2580,16 @@ def main() -> int:
                         pr_metrics = future.result()
                         metrics.append(pr_metrics)
 
+                        updated_at = pr.get("updated_at")
+                        updated_str = (
+                            format_timestamp_local(updated_at) if updated_at else "unknown"
+                        )
                         logger.info(
                             "Completed PR %d/%d: #%d (updated: %s)",
                             completed,
                             total_prs,
                             pr["number"],
-                            pr.get("updated_at", "unknown"),
+                            updated_str,
                         )
                     except Exception as e:
                         logger.error("Failed to process PR #%d: %s", pr["number"], e)

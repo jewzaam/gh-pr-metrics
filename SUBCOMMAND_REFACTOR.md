@@ -121,7 +121,7 @@ gh-pr-metrics fetch --pr 12345 --owner ansible --repo awx
 - `--init`: Initialize mode - discovers repos, validates access, stores state
 - `--update`: Update mode - fetch since last successful fetch timestamp
 - `--update-all`: Update all tracked repositories
-- `--wait`: Wait for rate limit reset between repos (used with `--update-all`)
+- `--wait`: Wait for rate limit reset and retry (used with `--update` or `--update-all`)
 - `--pr NUMBER`: Fetch single PR only (surgical update)
 - `--workers N`: Parallel workers for PR fetching (default: 4)
 - `--debug`: Enable debug logging

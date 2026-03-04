@@ -11,7 +11,7 @@ include make/test.mk
 include make/lint.mk
 
 .DEFAULT_GOAL := all
-.PHONY: help all
+.PHONY: help all all-data
 
 all: test-unit coverage lint format ## Run all checks (default target)
 
@@ -23,5 +23,8 @@ help: ## Display this help message
 	@echo ""
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-update:
+update: ## Fetch/update PR data for all tracked repositories
 	@GITHUB_TOKEN=$(gh auth token) gh-pr-metrics --workers 16 --update-all
+
+all-data: ## Merge per-repo CSVs into all-data.csv and all-data-rollup.csv
+	@python utility/create-single-csv.py data/

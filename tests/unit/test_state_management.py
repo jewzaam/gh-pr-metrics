@@ -563,6 +563,9 @@ class TestStateManagement:
                 f"https://api.github.com/repos/testowner/testrepo/issues/{pr_num}/timeline", json=[]
             )
             requests_mock.get(
+                f"https://api.github.com/repos/testowner/testrepo/issues/{pr_num}/events", json=[]
+            )
+            requests_mock.get(
                 f"https://api.github.com/repos/testowner/testrepo/issues/{pr_num}/comments", json=[]
             )
             requests_mock.get(

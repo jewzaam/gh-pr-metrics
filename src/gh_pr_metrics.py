@@ -649,6 +649,18 @@ def build_pr_json_data(pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, A
         logger.warning("Failed to fetch reviews for PR #%d: %s", pr_number, e)
         fetch_errors.append(f"reviews: {e}")
 
+    # Fetch timeline events (for ready_for_review detection)
+    timeline_events = []
+    try:
+        timeline_events = fetch_and_normalize_timeline_events(
+            github_client, owner, repo, pr_number
+        )
+    except GitHubAPIError as e:
+        logger.warning(
+            "Failed to fetch timeline events for PR #%d: %s", pr_number, e
+        )
+        fetch_errors.append(f"timeline_events: {e}")
+
     # Build complete PR data
     return {
         "pr_number": pr_number,
@@ -668,6 +680,7 @@ def build_pr_json_data(pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, A
         "issue_comments": issue_comments,
         "review_comments": review_comments,
         "reviews": reviews,
+        "timeline_events": timeline_events,
     }
 
 
@@ -834,6 +847,19 @@ class PRFetcher:
             self.logger.warning("Failed to fetch reviews for PR #%d: %s", pr_number, e)
             fetch_errors.append(f"reviews: {e}")
 
+        # Fetch timeline events (for ready_for_review detection)
+        timeline_events = []
+        try:
+            timeline_events = fetch_and_normalize_timeline_events(
+                self.github_client, owner, repo, pr_number
+            )
+        except GitHubAPIError as e:
+            self.logger.warning(
+                "Failed to fetch timeline events for PR #%d: %s",
+                pr_number, e,
+            )
+            fetch_errors.append(f"timeline_events: {e}")
+
         # Build complete PR data
         # Handle cases where user field is None (deleted/ghost users)
         pr_user = pr.get("user") or {}
@@ -855,6 +881,7 @@ class PRFetcher:
             "issue_comments": issue_comments,
             "review_comments": review_comments,
             "reviews": reviews,
+            "timeline_events": timeline_events,
         }
 
         # Include fetch errors if any occurred
@@ -1096,6 +1123,44 @@ class MetricsGenerator:
 
         return metrics
 
+    def recalculate_bot_fields(
+        self, pr_json_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Recalculate bot classification fields from cached PR JSON data.
+
+        Returns only the fields that depend on ai_bots config, for in-place
+        update of existing CSV rows. Does not touch other fields.
+
+        Args:
+            pr_json_data: Complete PR data from cached JSON file
+
+        Returns:
+            Dict with updated bot classification fields only
+        """
+        updates: Dict[str, Any] = {}
+
+        try:
+            (
+                total_comments,
+                non_ai_bot_comments,
+                ai_bot_comments,
+                non_ai_bot_names,
+                ai_bot_names,
+            ) = count_comments_from_json(pr_json_data, self.config)
+            updates["total_comment_count"] = total_comments
+            updates["non_ai_bot_comment_count"] = non_ai_bot_comments
+            updates["ai_bot_comment_count"] = ai_bot_comments
+            updates["non_ai_bot_login_names"] = non_ai_bot_names
+            updates["ai_bot_login_names"] = ai_bot_names
+        except Exception as e:
+            self.logger.debug(
+                "Error counting comments for PR #%d: %s",
+                pr_json_data.get("pr_number", "?"), e,
+            )
+
+        return updates
+
 
 class LoggingManager:
     """
@@ -1141,6 +1206,64 @@ csv_manager = CSVManager(logger=logger)
 # ============================================================================
 
 
+def fetch_and_normalize_timeline_events(
+    client: GitHubClient,
+    owner: str,
+    repo: str,
+    pr_number: int,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch timeline events from GitHub API and normalize to cacheable format.
+
+    Filters out None entries (deleted/removed events) and extracts only
+    the event type and created_at timestamp.
+
+    Args:
+        client: GitHub API client
+        owner: Repository owner
+        repo: Repository name
+        pr_number: PR number
+
+    Returns:
+        List of normalized event dicts with 'event' and 'created_at' keys
+    """
+    raw_events = client.fetch_timeline_events(owner, repo, pr_number)
+    return [
+        {
+            "event": event.get("event"),
+            "created_at": event.get("created_at"),
+        }
+        for event in raw_events
+        if event is not None
+    ]
+
+
+def get_ready_for_review_from_events(
+    events: List[Dict[str, Any]],
+    created_at: str,
+) -> str:
+    """
+    Extract the ready-for-review timestamp from timeline events.
+
+    Returns the created_at of the last ready_for_review event,
+    or the PR's created_at if no such event exists.
+
+    Args:
+        events: List of timeline event dicts (with 'event' and 'created_at')
+        created_at: PR created_at timestamp (fallback)
+
+    Returns:
+        Timestamp string for when the PR became ready for review
+    """
+    ready_events = [
+        e for e in events
+        if e and e.get("event") == "ready_for_review"
+    ]
+    if ready_events:
+        return ready_events[-1]["created_at"]
+    return created_at
+
+
 def get_ready_for_review_time(
     pr: Dict[str, Any], owner: str, repo: str, token: Optional[str]
 ) -> str:
@@ -1149,14 +1272,16 @@ def get_ready_for_review_time(
     if not pr.get("draft", False) and pr.get("created_at"):
         # Check events to see if it was ever a draft
         try:
-            events = github_client.fetch_timeline_events(owner, repo, pr["number"])
-            # Filter out None entries (deleted/removed events from GitHub API)
-            ready_events = [e for e in events if e and e.get("event") == "ready_for_review"]
-            if ready_events:
-                # Use the latest ready_for_review event
-                return ready_events[-1]["created_at"]
+            events = fetch_and_normalize_timeline_events(
+                github_client, owner, repo, pr["number"]
+            )
+            return get_ready_for_review_from_events(
+                events, pr["created_at"]
+            )
         except GitHubAPIError as e:
-            logger.debug("Failed to fetch events for PR #%d: %s", pr["number"], e)
+            logger.debug(
+                "Failed to fetch events for PR #%d: %s", pr["number"], e
+            )
 
     return pr["created_at"]
 
@@ -1603,6 +1728,12 @@ Examples:
   # Update all tracked repositories
   gh-pr-metrics --update-all
 
+  # Reprocess all cached data with current config (no API calls)
+  gh-pr-metrics --reprocess
+
+  # Reprocess a single repository
+  gh-pr-metrics --reprocess --owner microsoft --repo vscode
+
 Environment Variables:
   GITHUB_TOKEN    GitHub personal access token for authentication
         """,
@@ -1642,6 +1773,14 @@ Environment Variables:
         "--update-all",
         action="store_true",
         help="Update all tracked repositories. Cannot be used with --owner/--repo or --output.",
+    )
+    parser.add_argument(
+        "--reprocess",
+        action="store_true",
+        help="Reprocess cached PR JSON data with current config (no API calls). "
+        "Updates bot classification fields in existing CSVs using cached JSON. "
+        "All other fields are preserved. Useful after ai_bots config changes. "
+        "Without --owner/--repo, reprocesses all tracked repositories.",
     )
     parser.add_argument(
         "--wait",
@@ -2062,6 +2201,92 @@ def process_repository(
     return EXIT_CODE_SUCCESS, chunks_completed, total_chunks_fetched
 
 
+def reprocess_repository(
+    owner: str,
+    repo: str,
+    output_file: str,
+    config: Config,
+    workers: int,
+) -> int:
+    """
+    Reprocess cached PR JSON to update bot classification fields in existing CSV.
+
+    Reads existing CSV rows, loads cached JSON for each PR, recalculates only
+    the bot classification fields using current config, and writes the updated CSV.
+    All other fields (days_in_review, ready_for_review_at, etc.) are preserved.
+
+    No GitHub API calls are made.
+
+    Returns EXIT_CODE_SUCCESS on success, EXIT_CODE_ERROR_QUOTA on error.
+    """
+    repo_ctx = f"{owner}/{repo}"
+    raw_dir = Path(config.raw_data_dir) / "github.com" / owner / repo
+
+    # Read existing CSV
+    existing_data = csv_manager.read_csv(output_file)
+    if not existing_data:
+        logger.warning("[%s] No existing CSV data found at %s", repo_ctx, output_file)
+        return EXIT_CODE_SUCCESS
+
+    if not raw_dir.exists():
+        logger.warning("[%s] No cached JSON data found at %s", repo_ctx, raw_dir)
+        return EXIT_CODE_SUCCESS
+
+    logger.info(
+        "[%s] Reprocessing %d PRs from CSV using cached JSON",
+        repo_ctx, len(existing_data),
+    )
+
+    metrics_generator = MetricsGenerator(config, logger)
+    updated_count = 0
+    skipped_count = 0
+
+    def load_and_recalculate(pr_number: int) -> Optional[Dict[str, Any]]:
+        json_file = raw_dir / f"{pr_number}.json"
+        if not json_file.exists():
+            return None
+        with open(json_file, "r", encoding="utf-8") as f:
+            pr_json_data = json.load(f)
+        return metrics_generator.recalculate_bot_fields(pr_json_data)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_pr = {
+            executor.submit(load_and_recalculate, pr_num): pr_num
+            for pr_num in existing_data
+        }
+        for future in as_completed(future_to_pr):
+            pr_num = future_to_pr[future]
+            try:
+                updates = future.result()
+                if updates:
+                    # Update only bot classification fields in-place
+                    for key, value in updates.items():
+                        existing_data[pr_num][key] = value
+                    updated_count += 1
+                else:
+                    skipped_count += 1
+            except Exception as e:
+                logger.error(
+                    "[%s] Error reprocessing PR #%d: %s",
+                    repo_ctx, pr_num, e,
+                )
+                skipped_count += 1
+
+    if updated_count == 0:
+        logger.warning("[%s] No PRs updated", repo_ctx)
+        return EXIT_CODE_SUCCESS
+
+    # Write updated CSV
+    all_metrics = list(existing_data.values())
+    csv_manager.write_csv(all_metrics, output_file, merge_mode=False)
+    logger.info(
+        "[%s] Updated %d PRs (%d skipped, no cached JSON) in %s",
+        repo_ctx, updated_count, skipped_count, output_file,
+    )
+
+    return EXIT_CODE_SUCCESS
+
+
 def main() -> int:
     """Main entry point."""
     args = parse_arguments()
@@ -2145,18 +2370,106 @@ def main() -> int:
         logger.error("--wait can only be used with --update or --update-all")
         return EXIT_CODE_ERROR_QUOTA
 
-    if args.pr and (args.init or args.update or args.update_all):
-        logger.error("--pr cannot be used with --init, --update, or --update-all")
+    if args.pr and (args.init or args.update or args.update_all or args.reprocess):
+        logger.error("--pr cannot be used with --init, --update, --update-all, or --reprocess")
         return EXIT_CODE_ERROR_QUOTA
 
     if args.pr and not args.output and not config.output_pattern:
         logger.error("--pr requires --output or config output_pattern to specify the CSV file")
         return EXIT_CODE_ERROR_QUOTA
 
+    if args.reprocess and (args.init or args.update or args.update_all):
+        logger.error("--reprocess cannot be used with --init, --update, or --update-all")
+        return EXIT_CODE_ERROR_QUOTA
+
+    if args.reprocess and (args.start or args.end):
+        logger.error("--reprocess cannot be used with --start or --end (uses cached data)")
+        return EXIT_CODE_ERROR_QUOTA
+
+    if args.reprocess and args.output:
+        logger.error(
+            "--reprocess cannot be used with --output (uses stored CSV paths from state file)"
+        )
+        return EXIT_CODE_ERROR_QUOTA
+
+    if args.reprocess and args.wait:
+        logger.error("--reprocess cannot be used with --wait (no API calls needed)")
+        return EXIT_CODE_ERROR_QUOTA
+
     # Regular mode requires --start (update modes use state file timestamps)
-    if not (args.init or args.update or args.update_all or args.pr) and not args.start:
+    has_mode = args.init or args.update or args.update_all or args.pr or args.reprocess
+    if not has_mode and not args.start:
         logger.error("--start is required to specify the starting date")
         return EXIT_CODE_ERROR_QUOTA
+
+    # Handle reprocess mode (no API calls needed)
+    if args.reprocess:
+        workers = args.workers if args.workers else config.workers
+
+        if args.owner or args.repo:
+            # Single repo reprocess
+            owner = args.owner
+            repo = args.repo
+            if not owner or not repo:
+                logger.error("--reprocess with --owner requires --repo (and vice versa)")
+                return EXIT_CODE_ERROR_QUOTA
+
+            try:
+                repo_state = state_manager.get_repo_state(owner, repo)
+            except ValueError as e:
+                logger.error("State file validation failed: %s", e)
+                return EXIT_CODE_ERROR_QUOTA
+
+            if not repo_state:
+                logger.error(
+                    "Repository %s/%s not found in state file. "
+                    "Run --init first to track this repository.",
+                    owner,
+                    repo,
+                )
+                return EXIT_CODE_ERROR_QUOTA
+
+            csv_file = repo_state["csv_file"]
+            return reprocess_repository(owner, repo, csv_file, config, workers)
+        else:
+            # Reprocess all tracked repos
+            try:
+                tracked_repos = state_manager.get_all_tracked_repos()
+            except Exception as e:
+                logger.error("Failed to load state file: %s", e)
+                return EXIT_CODE_ERROR_QUOTA
+
+            if not tracked_repos:
+                logger.error(
+                    "No tracked repositories found in state file. "
+                    "Run --init first to track repositories."
+                )
+                return EXIT_CODE_ERROR_QUOTA
+
+            logger.info("Reprocessing %d tracked repositories from cache", len(tracked_repos))
+
+            completed_repos = 0
+            for repo_info in tracked_repos:
+                owner = repo_info["owner"]
+                repo = repo_info["repo"]
+                csv_file = repo_info["csv_file"]
+
+                if not csv_file:
+                    logger.warning("Skipping %s/%s: no CSV file stored in state", owner, repo)
+                    continue
+
+                logger.info("=" * 80)
+                exit_code = reprocess_repository(owner, repo, csv_file, config, workers)
+                if exit_code == EXIT_CODE_SUCCESS:
+                    completed_repos += 1
+                else:
+                    logger.error("Failed to reprocess %s/%s", owner, repo)
+
+            logger.info("=" * 80)
+            logger.info(
+                "Reprocessing complete: %d/%d repositories", completed_repos, len(tracked_repos)
+            )
+            return EXIT_CODE_SUCCESS
 
     # Get GitHub token and initialize client
     token = get_github_token()

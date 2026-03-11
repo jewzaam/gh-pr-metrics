@@ -61,6 +61,9 @@ class TestBuildPrJsonData:
                 "submitted_at": "2024-01-01T12:00:00Z",
             }
         ]
+        mock_client.fetch_timeline_events.return_value = [
+            {"event": "ready_for_review", "created_at": "2024-01-01T06:00:00Z"},
+        ]
 
         with mock.patch.object(gh_pr_metrics, "github_client", mock_client):
             result = gh_pr_metrics.build_pr_json_data(pr, "owner", "repo")
@@ -72,6 +75,8 @@ class TestBuildPrJsonData:
         assert len(result["issue_comments"]) == 1
         assert len(result["review_comments"]) == 1
         assert len(result["reviews"]) == 1
+        assert len(result["timeline_events"]) == 1
+        assert result["timeline_events"][0]["event"] == "ready_for_review"
 
     def test_handles_missing_comments_gracefully(self):
         """Test handles API errors when fetching comments."""
@@ -91,6 +96,7 @@ class TestBuildPrJsonData:
         mock_client.fetch_issue_comments.side_effect = GitHubAPIError("API Error", 500)
         mock_client.fetch_review_comments.side_effect = GitHubAPIError("API Error", 500)
         mock_client.fetch_reviews.side_effect = GitHubAPIError("API Error", 500)
+        mock_client.fetch_timeline_events.side_effect = GitHubAPIError("API Error", 500)
 
         with mock.patch.object(gh_pr_metrics, "github_client", mock_client):
             result = gh_pr_metrics.build_pr_json_data(pr, "owner", "repo")
@@ -99,6 +105,7 @@ class TestBuildPrJsonData:
         assert len(result["issue_comments"]) == 0
         assert len(result["review_comments"]) == 0
         assert len(result["reviews"]) == 0
+        assert len(result["timeline_events"]) == 0
 
 
 class TestWritePrJson:

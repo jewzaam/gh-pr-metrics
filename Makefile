@@ -11,7 +11,7 @@ include make/test.mk
 include make/lint.mk
 
 .DEFAULT_GOAL := all
-.PHONY: help all all-data
+.PHONY: help all all-data reprocess
 
 all: test-unit coverage lint format ## Run all checks (default target)
 
@@ -25,6 +25,9 @@ help: ## Display this help message
 
 update: ## Fetch/update PR data for all tracked repositories
 	@GITHUB_TOKEN=$(gh auth token) gh-pr-metrics --workers 16 --update-all
+
+reprocess: ## Reprocess cached PR data with current config (no API calls)
+	@gh-pr-metrics --reprocess
 
 all-data: ## Merge per-repo CSVs into all-data.csv and all-data-rollup.csv
 	@python utility/create-single-csv.py data/

@@ -95,9 +95,7 @@ class TestGetReadyForReviewFromEvents:
 
     def test_no_events(self):
         """Returns created_at when no events."""
-        result = gh_pr_metrics.get_ready_for_review_from_events(
-            [], "2024-01-01T00:00:00Z"
-        )
+        result = gh_pr_metrics.get_ready_for_review_from_events([], "2024-01-01T00:00:00Z")
         assert result == "2024-01-01T00:00:00Z"
 
     def test_no_ready_events(self):
@@ -105,9 +103,7 @@ class TestGetReadyForReviewFromEvents:
         events = [
             {"event": "labeled", "created_at": "2024-01-02T00:00:00Z"},
         ]
-        result = gh_pr_metrics.get_ready_for_review_from_events(
-            events, "2024-01-01T00:00:00Z"
-        )
+        result = gh_pr_metrics.get_ready_for_review_from_events(events, "2024-01-01T00:00:00Z")
         assert result == "2024-01-01T00:00:00Z"
 
     def test_single_ready_event(self):
@@ -115,9 +111,7 @@ class TestGetReadyForReviewFromEvents:
         events = [
             {"event": "ready_for_review", "created_at": "2024-01-03T00:00:00Z"},
         ]
-        result = gh_pr_metrics.get_ready_for_review_from_events(
-            events, "2024-01-01T00:00:00Z"
-        )
+        result = gh_pr_metrics.get_ready_for_review_from_events(events, "2024-01-01T00:00:00Z")
         assert result == "2024-01-03T00:00:00Z"
 
     def test_multiple_ready_events_uses_last(self):
@@ -127,9 +121,7 @@ class TestGetReadyForReviewFromEvents:
             {"event": "convert_to_draft", "created_at": "2024-01-03T00:00:00Z"},
             {"event": "ready_for_review", "created_at": "2024-01-04T00:00:00Z"},
         ]
-        result = gh_pr_metrics.get_ready_for_review_from_events(
-            events, "2024-01-01T00:00:00Z"
-        )
+        result = gh_pr_metrics.get_ready_for_review_from_events(events, "2024-01-01T00:00:00Z")
         assert result == "2024-01-04T00:00:00Z"
 
     def test_none_entries_filtered(self):
@@ -139,9 +131,7 @@ class TestGetReadyForReviewFromEvents:
             {"event": "ready_for_review", "created_at": "2024-01-02T00:00:00Z"},
             None,
         ]
-        result = gh_pr_metrics.get_ready_for_review_from_events(
-            events, "2024-01-01T00:00:00Z"
-        )
+        result = gh_pr_metrics.get_ready_for_review_from_events(events, "2024-01-01T00:00:00Z")
         assert result == "2024-01-02T00:00:00Z"
 
 
@@ -152,9 +142,7 @@ class TestFetchAndNormalizeTimelineEvents:
         """Filters None, extracts event and created_at."""
         from github_api import GitHubClient
 
-        client = GitHubClient(
-            "fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
-        )
+        client = GitHubClient("fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger)
         requests_mock.get(
             "https://api.github.com/repos/o/r/issues/1/events",
             json=[
@@ -172,9 +160,7 @@ class TestFetchAndNormalizeTimelineEvents:
             ],
         )
 
-        result = gh_pr_metrics.fetch_and_normalize_timeline_events(
-            client, "o", "r", 1
-        )
+        result = gh_pr_metrics.fetch_and_normalize_timeline_events(client, "o", "r", 1)
 
         assert len(result) == 2
         assert result[0] == {
@@ -190,26 +176,20 @@ class TestFetchAndNormalizeTimelineEvents:
         """Returns empty list when no events."""
         from github_api import GitHubClient
 
-        client = GitHubClient(
-            "fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
-        )
+        client = GitHubClient("fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger)
         requests_mock.get(
             "https://api.github.com/repos/o/r/issues/1/events",
             json=[],
         )
 
-        result = gh_pr_metrics.fetch_and_normalize_timeline_events(
-            client, "o", "r", 1
-        )
+        result = gh_pr_metrics.fetch_and_normalize_timeline_events(client, "o", "r", 1)
         assert result == []
 
     def test_api_error_propagates(self, requests_mock):
         """GitHubAPIError is not caught — callers handle it."""
         from github_api import GitHubClient, GitHubAPIError
 
-        client = GitHubClient(
-            "fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
-        )
+        client = GitHubClient("fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger)
         requests_mock.get(
             "https://api.github.com/repos/o/r/issues/1/events",
             status_code=500,
@@ -218,9 +198,7 @@ class TestFetchAndNormalizeTimelineEvents:
         import pytest
 
         with pytest.raises(GitHubAPIError):
-            gh_pr_metrics.fetch_and_normalize_timeline_events(
-                client, "o", "r", 1
-            )
+            gh_pr_metrics.fetch_and_normalize_timeline_events(client, "o", "r", 1)
 
 
 class TestReadyForReviewTime:
@@ -944,9 +922,7 @@ class TestRecalculateBotFields:
         assert result["non_ai_bot_comment_count"] == 1
 
         # With coderabbitai in config
-        config_with = gh_pr_metrics.Config(
-            {"ai_bots": {"always": ["coderabbitai"]}}
-        )
+        config_with = gh_pr_metrics.Config({"ai_bots": {"always": ["coderabbitai"]}})
         gen = gh_pr_metrics.MetricsGenerator(config_with, gh_pr_metrics.logger)
         result = gen.recalculate_bot_fields(pr_json)
         assert result["ai_bot_comment_count"] == 1
@@ -1015,13 +991,18 @@ class TestReprocessRepository:
 
         # Write existing CSV with specific values we want preserved
         csv_file = str(tmp_path / "output.csv")
-        self._write_csv(csv_file, [self._make_csv_row(
-            1,
-            ready_for_review_at="2024-01-01T12:00:00Z",
-            days_in_review="0.5",
-            days_open="1.0",
-            approval_count="2",
-        )])
+        self._write_csv(
+            csv_file,
+            [
+                self._make_csv_row(
+                    1,
+                    ready_for_review_at="2024-01-01T12:00:00Z",
+                    days_in_review="0.5",
+                    days_open="1.0",
+                    approval_count="2",
+                )
+            ],
+        )
 
         result = gh_pr_metrics.reprocess_repository(
             "owner", "repo", csv_file, default_config, workers=1
@@ -1062,23 +1043,28 @@ class TestReprocessRepository:
 
         # Existing CSV has coderabbitai classified as non-AI
         csv_file = str(tmp_path / "output.csv")
-        self._write_csv(csv_file, [self._make_csv_row(
-            1,
-            non_ai_bot_comment_count="1",
-            ai_bot_comment_count="0",
-            non_ai_bot_login_names="coderabbitai",
-            ai_bot_login_names="",
-        )])
+        self._write_csv(
+            csv_file,
+            [
+                self._make_csv_row(
+                    1,
+                    non_ai_bot_comment_count="1",
+                    ai_bot_comment_count="0",
+                    non_ai_bot_login_names="coderabbitai",
+                    ai_bot_login_names="",
+                )
+            ],
+        )
 
         # Reprocess with coderabbitai now classified as AI
-        config = gh_pr_metrics.Config({
-            "ai_bots": {"always": ["coderabbitai"]},
-            "raw_data_dir": str(tmp_path / "raw"),
-        })
-
-        result = gh_pr_metrics.reprocess_repository(
-            "owner", "repo", csv_file, config, workers=1
+        config = gh_pr_metrics.Config(
+            {
+                "ai_bots": {"always": ["coderabbitai"]},
+                "raw_data_dir": str(tmp_path / "raw"),
+            }
         )
+
+        result = gh_pr_metrics.reprocess_repository("owner", "repo", csv_file, config, workers=1)
         assert result == gh_pr_metrics.EXIT_CODE_SUCCESS
 
         import csv as csv_mod
@@ -1132,10 +1118,13 @@ class TestReprocessRepository:
             json.dump(pr_json, f)
 
         csv_file = str(tmp_path / "output.csv")
-        self._write_csv(csv_file, [
-            self._make_csv_row(1, non_ai_bot_login_names="old_bot"),
-            self._make_csv_row(2, non_ai_bot_login_names="preserved"),
-        ])
+        self._write_csv(
+            csv_file,
+            [
+                self._make_csv_row(1, non_ai_bot_login_names="old_bot"),
+                self._make_csv_row(2, non_ai_bot_login_names="preserved"),
+            ],
+        )
 
         result = gh_pr_metrics.reprocess_repository(
             "owner", "repo", csv_file, default_config, workers=1

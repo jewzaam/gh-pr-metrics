@@ -652,13 +652,9 @@ def build_pr_json_data(pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, A
     # Fetch timeline events (for ready_for_review detection)
     timeline_events = []
     try:
-        timeline_events = fetch_and_normalize_timeline_events(
-            github_client, owner, repo, pr_number
-        )
+        timeline_events = fetch_and_normalize_timeline_events(github_client, owner, repo, pr_number)
     except GitHubAPIError as e:
-        logger.warning(
-            "Failed to fetch timeline events for PR #%d: %s", pr_number, e
-        )
+        logger.warning("Failed to fetch timeline events for PR #%d: %s", pr_number, e)
         fetch_errors.append(f"timeline_events: {e}")
 
     # Build complete PR data
@@ -856,7 +852,8 @@ class PRFetcher:
         except GitHubAPIError as e:
             self.logger.warning(
                 "Failed to fetch timeline events for PR #%d: %s",
-                pr_number, e,
+                pr_number,
+                e,
             )
             fetch_errors.append(f"timeline_events: {e}")
 
@@ -1124,7 +1121,8 @@ class MetricsGenerator:
         return metrics
 
     def recalculate_bot_fields(
-        self, pr_json_data: Dict[str, Any],
+        self,
+        pr_json_data: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
         Recalculate bot classification fields from cached PR JSON data.
@@ -1156,7 +1154,8 @@ class MetricsGenerator:
         except Exception as e:
             self.logger.debug(
                 "Error counting comments for PR #%d: %s",
-                pr_json_data.get("pr_number", "?"), e,
+                pr_json_data.get("pr_number", "?"),
+                e,
             )
 
         return updates
@@ -1255,10 +1254,7 @@ def get_ready_for_review_from_events(
     Returns:
         Timestamp string for when the PR became ready for review
     """
-    ready_events = [
-        e for e in events
-        if e and e.get("event") == "ready_for_review"
-    ]
+    ready_events = [e for e in events if e and e.get("event") == "ready_for_review"]
     if ready_events:
         return ready_events[-1]["created_at"]
     return created_at
@@ -1272,16 +1268,10 @@ def get_ready_for_review_time(
     if not pr.get("draft", False) and pr.get("created_at"):
         # Check events to see if it was ever a draft
         try:
-            events = fetch_and_normalize_timeline_events(
-                github_client, owner, repo, pr["number"]
-            )
-            return get_ready_for_review_from_events(
-                events, pr["created_at"]
-            )
+            events = fetch_and_normalize_timeline_events(github_client, owner, repo, pr["number"])
+            return get_ready_for_review_from_events(events, pr["created_at"])
         except GitHubAPIError as e:
-            logger.debug(
-                "Failed to fetch events for PR #%d: %s", pr["number"], e
-            )
+            logger.debug("Failed to fetch events for PR #%d: %s", pr["number"], e)
 
     return pr["created_at"]
 
@@ -2234,7 +2224,8 @@ def reprocess_repository(
 
     logger.info(
         "[%s] Reprocessing %d PRs from CSV using cached JSON",
-        repo_ctx, len(existing_data),
+        repo_ctx,
+        len(existing_data),
     )
 
     metrics_generator = MetricsGenerator(config, logger)
@@ -2251,8 +2242,7 @@ def reprocess_repository(
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_pr = {
-            executor.submit(load_and_recalculate, pr_num): pr_num
-            for pr_num in existing_data
+            executor.submit(load_and_recalculate, pr_num): pr_num for pr_num in existing_data
         }
         for future in as_completed(future_to_pr):
             pr_num = future_to_pr[future]
@@ -2268,7 +2258,9 @@ def reprocess_repository(
             except Exception as e:
                 logger.error(
                     "[%s] Error reprocessing PR #%d: %s",
-                    repo_ctx, pr_num, e,
+                    repo_ctx,
+                    pr_num,
+                    e,
                 )
                 skipped_count += 1
 
@@ -2281,7 +2273,10 @@ def reprocess_repository(
     csv_manager.write_csv(all_metrics, output_file, merge_mode=False)
     logger.info(
         "[%s] Updated %d PRs (%d skipped, no cached JSON) in %s",
-        repo_ctx, updated_count, skipped_count, output_file,
+        repo_ctx,
+        updated_count,
+        skipped_count,
+        output_file,
     )
 
     return EXIT_CODE_SUCCESS

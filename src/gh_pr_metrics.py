@@ -2706,6 +2706,8 @@ def main() -> int:
 
             # Failed at least one repo
             if args.wait:
+                # Re-read tracked repos to get updated timestamps from processing
+                tracked_repos = state_manager.get_all_tracked_repos()
                 # Show progress summary before waiting
                 show_update_all_progress_summary(tracked_repos, completed_repos, failed_repo)
                 logger.info("Will wait for quota reset, then restart from beginning")

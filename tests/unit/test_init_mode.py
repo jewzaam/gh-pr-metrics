@@ -19,13 +19,17 @@ class TestInitMode:
 
     def test_init_requires_owner(self):
         """Test that --init requires --owner."""
-        with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--init", "--output", "test.csv"]):
+        with mock.patch.object(
+            sys, "argv", ["gh-pr-metrics", "--init", "--output", "test.csv"]
+        ):
             result = gh_pr_metrics.main()
             assert result == 1
 
     def test_init_requires_output(self):
         """Test that --init requires --output."""
-        with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--init", "--owner", "testowner"]):
+        with mock.patch.object(
+            sys, "argv", ["gh-pr-metrics", "--init", "--owner", "testowner"]
+        ):
             result = gh_pr_metrics.main()
             assert result == 1
 
@@ -107,14 +111,18 @@ class TestInitMode:
                 "2024-01-01",
             ],
         ):
-            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            with mock.patch.object(
+                gh_pr_metrics.state_manager, "_state_file", state_file
+            ):
                 result = gh_pr_metrics.main()
                 assert result == 0
 
                 # Verify state file (within mock context)
                 state = gh_pr_metrics.state_manager.load()
                 assert "https://github.com/testowner/testrepo" in state
-                assert state["https://github.com/testowner/testrepo"]["csv_file"] == str(csv_file)
+                assert state["https://github.com/testowner/testrepo"][
+                    "csv_file"
+                ] == str(csv_file)
 
         # CSV file not created until first update with actual data
         assert not csv_file.exists()
@@ -177,7 +185,9 @@ class TestInitMode:
                 "2024-01-01",
             ],
         ):
-            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            with mock.patch.object(
+                gh_pr_metrics.state_manager, "_state_file", state_file
+            ):
                 result = gh_pr_metrics.main()
                 assert result == 0
 
@@ -193,7 +203,9 @@ class TestInitMode:
         assert not (output_dir / "testowner-repo2.csv").exists()
         assert not (output_dir / "testowner-repo3.csv").exists()
 
-    def test_init_initializes_all_repos_without_validation(self, requests_mock, tmp_path):
+    def test_init_initializes_all_repos_without_validation(
+        self, requests_mock, tmp_path
+    ):
         """
         Test that init initializes all repos without validation.
         Access errors will show during processing.
@@ -239,7 +251,9 @@ class TestInitMode:
                 output_pattern,
             ],
         ):
-            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            with mock.patch.object(
+                gh_pr_metrics.state_manager, "_state_file", state_file
+            ):
                 result = gh_pr_metrics.main()
                 # Should succeed - all repos initialized without validation
                 assert result == 0
@@ -312,7 +326,9 @@ class TestInitMode:
                 output_pattern,
             ],
         ):
-            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            with mock.patch.object(
+                gh_pr_metrics.state_manager, "_state_file", state_file
+            ):
                 result = gh_pr_metrics.main()
                 assert result == 0
 
@@ -320,7 +336,9 @@ class TestInitMode:
                 state = gh_pr_metrics.state_manager.load()
                 assert len(state) == 2
                 # Existing repo should keep its original csv_file
-                assert state["https://github.com/testowner/existing"]["csv_file"] == str(csv_file)
+                assert state["https://github.com/testowner/existing"][
+                    "csv_file"
+                ] == str(csv_file)
 
 
 class TestExpandPattern:
@@ -328,22 +346,30 @@ class TestExpandPattern:
 
     def test_expand_basic_pattern(self):
         """Test basic pattern expansion."""
-        result = gh_pr_metrics.expand_output_pattern("data/{owner}-{repo}.csv", "myowner", "myrepo")
+        result = gh_pr_metrics.expand_output_pattern(
+            "data/{owner}-{repo}.csv", "myowner", "myrepo"
+        )
         assert result == "data/myowner-myrepo.csv"
 
     def test_expand_owner_only(self):
         """Test pattern with only owner."""
-        result = gh_pr_metrics.expand_output_pattern("{owner}/metrics.csv", "testowner", "testrepo")
+        result = gh_pr_metrics.expand_output_pattern(
+            "{owner}/metrics.csv", "testowner", "testrepo"
+        )
         assert result == "testowner/metrics.csv"
 
     def test_expand_repo_only(self):
         """Test pattern with only repo."""
-        result = gh_pr_metrics.expand_output_pattern("data/{repo}.csv", "testowner", "testrepo")
+        result = gh_pr_metrics.expand_output_pattern(
+            "data/{repo}.csv", "testowner", "testrepo"
+        )
         assert result == "data/testrepo.csv"
 
     def test_expand_no_placeholders(self):
         """Test pattern without placeholders."""
-        result = gh_pr_metrics.expand_output_pattern("data/metrics.csv", "testowner", "testrepo")
+        result = gh_pr_metrics.expand_output_pattern(
+            "data/metrics.csv", "testowner", "testrepo"
+        )
         assert result == "data/metrics.csv"
 
     def test_expand_multiple_occurrences(self):

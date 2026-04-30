@@ -39,7 +39,9 @@ class TestGitHubClient:
         client.make_request(url)
 
         assert "Authorization" in requests_mock.last_request.headers
-        assert requests_mock.last_request.headers["Authorization"] == "Bearer test_token"
+        assert (
+            requests_mock.last_request.headers["Authorization"] == "Bearer test_token"
+        )
 
     def test_make_request_updates_quota(self, requests_mock):
         """Test that make_request updates quota_manager from headers."""

@@ -63,7 +63,9 @@ def load_state_file(state_file_path: Path) -> Dict[str, Any]:
         return {}
 
 
-def get_tracked_repos_with_csv(state_file_path: Path, csv_dir: Path) -> List[Dict[str, str]]:
+def get_tracked_repos_with_csv(
+    state_file_path: Path, csv_dir: Path
+) -> List[Dict[str, str]]:
     """
     Get list of tracked repositories that have CSV files.
     Returns list of dicts with 'owner', 'repo', 'csv_file' keys.
@@ -92,7 +94,9 @@ def get_tracked_repos_with_csv(state_file_path: Path, csv_dir: Path) -> List[Dic
                 # Check if CSV file exists
                 csv_path = Path(csv_file)
                 if not csv_path.exists():
-                    logging.debug("Skipping %s/%s: CSV file not found: %s", owner, repo, csv_file)
+                    logging.debug(
+                        "Skipping %s/%s: CSV file not found: %s", owner, repo, csv_file
+                    )
                     continue
 
                 repos.append({"owner": owner, "repo": repo, "csv_file": csv_file})
@@ -103,7 +107,9 @@ def get_tracked_repos_with_csv(state_file_path: Path, csv_dir: Path) -> List[Dic
     return repos
 
 
-def read_prs_from_csv(csv_file: str, start_date: datetime, count: int) -> List[Dict[str, Any]]:
+def read_prs_from_csv(
+    csv_file: str, start_date: datetime, count: int
+) -> List[Dict[str, Any]]:
     """
     Read PRs from CSV file, filter by start_date, and return top N most recently created.
     Returns list of dicts with pr_number and created_at.
@@ -137,7 +143,7 @@ def read_prs_from_csv(csv_file: str, start_date: datetime, count: int) -> List[D
                 prs.append({"pr_number": pr_number, "created_at": created_at})
 
         # Sort by created_at descending (most recent first)
-        prs.sort(key=lambda x: x["created_at"], reverse=True)
+        prs.sort(key=lambda x: str(x["created_at"]), reverse=True)
 
         # Return top N
         return prs[:count]
@@ -174,7 +180,9 @@ def fetch_pr_details(
                     }
                 )
         except GitHubAPIError as e:
-            logging.warning("Failed to fetch issue comments for PR #%d: %s", pr_number, e)
+            logging.warning(
+                "Failed to fetch issue comments for PR #%d: %s", pr_number, e
+            )
 
         # Fetch review comments
         review_comments = []
@@ -194,7 +202,9 @@ def fetch_pr_details(
                     }
                 )
         except GitHubAPIError as e:
-            logging.warning("Failed to fetch review comments for PR #%d: %s", pr_number, e)
+            logging.warning(
+                "Failed to fetch review comments for PR #%d: %s", pr_number, e
+            )
 
         # Fetch reviews
         reviews = []
@@ -240,7 +250,9 @@ def fetch_pr_details(
         return None
 
 
-def write_pr_json(output_dir: Path, owner: str, repo: str, pr_data: Dict[str, Any]) -> None:
+def write_pr_json(
+    output_dir: Path, owner: str, repo: str, pr_data: Dict[str, Any]
+) -> None:
     """Write PR data to JSON file in nested directory structure."""
     # Create directory structure: output_dir/owner/repo/
     repo_dir = output_dir / owner / repo
@@ -299,7 +311,9 @@ Environment Variables:
         help="Number of most recent PRs to extract per repository (default: 1)",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
+    )
 
     if ARGCOMPLETE_AVAILABLE:
         argcomplete.autocomplete(parser)
@@ -396,7 +410,9 @@ def main() -> int:
     total_api_calls = len(prs_to_process) * API_CALLS_PER_PR
     logging.info("=" * 80)
     logging.info("Total PRs to process: %d", len(prs_to_process))
-    logging.info("Estimated API calls: %d (%d per PR)", total_api_calls, API_CALLS_PER_PR)
+    logging.info(
+        "Estimated API calls: %d (%d per PR)", total_api_calls, API_CALLS_PER_PR
+    )
 
     # Check quota (all-or-nothing)
     remaining, limit, _ = quota_manager.get_current_quota()

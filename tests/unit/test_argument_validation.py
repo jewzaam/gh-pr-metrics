@@ -129,7 +129,15 @@ class TestArgumentValidation:
         with mock.patch.object(
             sys,
             "argv",
-            ["gh-pr-metrics", "--update", "--update-all", "--owner", "test", "--repo", "test"],
+            [
+                "gh-pr-metrics",
+                "--update",
+                "--update-all",
+                "--owner",
+                "test",
+                "--repo",
+                "test",
+            ],
         ):
             result = gh_pr_metrics.main()
             assert result == 1
@@ -139,7 +147,11 @@ class TestArgumentValidation:
         # Mock rate limit
         requests_mock.get(
             "https://api.github.com/rate_limit",
-            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+            json={
+                "resources": {
+                    "core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}
+                }
+            },
         )
 
         with mock.patch.object(
@@ -274,14 +286,26 @@ class TestArgumentValidation:
             },
         )
 
-        requests_mock.get("https://api.github.com/repos/test/test/issues/123/events", json=[])
-        requests_mock.get("https://api.github.com/repos/test/test/issues/123/comments", json=[])
-        requests_mock.get("https://api.github.com/repos/test/test/pulls/123/comments", json=[])
-        requests_mock.get("https://api.github.com/repos/test/test/pulls/123/reviews", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/test/test/issues/123/events", json=[]
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/test/test/issues/123/comments", json=[]
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/test/test/pulls/123/comments", json=[]
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/test/test/pulls/123/reviews", json=[]
+        )
 
         requests_mock.get(
             "https://api.github.com/rate_limit",
-            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+            json={
+                "resources": {
+                    "core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}
+                }
+            },
         )
 
         with mock.patch.object(
@@ -289,7 +313,9 @@ class TestArgumentValidation:
             "argv",
             ["gh-pr-metrics", "--owner", "test", "--repo", "test", "--pr", "123"],
         ):
-            with mock.patch("gh_pr_metrics.load_config", return_value=config_with_pattern):
+            with mock.patch(
+                "gh_pr_metrics.load_config", return_value=config_with_pattern
+            ):
                 # Change to tmp_path for output
                 with mock.patch(
                     "gh_pr_metrics.expand_output_pattern", return_value=str(output_file)

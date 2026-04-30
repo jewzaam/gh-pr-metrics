@@ -6,11 +6,11 @@
 
 venv: ## Create Python virtual environment
 	@if [ ! -d "$(VENV_DIR)" ]; then \
-		$(PYTHON) -m venv $(VENV_DIR); \
+		$(PY_SYS) -m venv $(VENV_DIR); \
 		printf "$(GREEN)✅ Virtual environment created$(RESET)\n"; \
 	fi
 	@if [ ! -f "$(VENV_DIR)/bin/pip" ]; then \
-		$(VENV_PYTHON) -m ensurepip --upgrade; \
+		$(PYTHON) -m ensurepip --upgrade; \
 		printf "$(GREEN)✅ pip installed$(RESET)\n"; \
 	fi
 
@@ -41,7 +41,9 @@ setup-dev: requirements-dev-txt ## Install dev deps from requirements-dev.txt + 
 	@$(VENV_UV) pip install -e .
 	@echo "✅ Full dev environment ready (requirements-dev.txt + editable package)"
 
-install-package: requirements-dev ## Install package in editable mode (needed for tests)
+install-dev: requirements-dev ## Install dev dependencies + editable package
+
+install-package: install-dev ## Install package in editable mode (needed for tests)
 	@$(VENV_UV) pip install -e .
 	@echo "✅ Package installed in editable mode in $(VENV_DIR)"
 

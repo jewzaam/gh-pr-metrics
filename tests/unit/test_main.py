@@ -16,7 +16,9 @@ class TestMain:
         """Test that main() returns error when repo cannot be determined."""
         with mock.patch.object(sys, "argv", ["gh-pr-metrics"]):
             with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
-                with mock.patch("gh_pr_metrics.get_repo_from_git", return_value=(None, None)):
+                with mock.patch(
+                    "gh_pr_metrics.get_repo_from_git", return_value=(None, None)
+                ):
                     result = gh_pr_metrics.main()
                     assert result == 1
 
@@ -54,12 +56,15 @@ class TestMain:
         ):
             with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
                 with mock.patch(
-                    "gh_pr_metrics.get_repo_from_git", return_value=("testowner", "testrepo")
+                    "gh_pr_metrics.get_repo_from_git",
+                    return_value=("testowner", "testrepo"),
                 ):
                     result = gh_pr_metrics.main()
                     assert result == 1
 
-    def test_main_update_mode_with_existing_state(self, requests_mock, tmp_path, default_config):
+    def test_main_update_mode_with_existing_state(
+        self, requests_mock, tmp_path, default_config
+    ):
         """Test update mode uses last update date from state file."""
         state_file = tmp_path / "state.yaml"
         output_file = tmp_path / "test.csv"
@@ -83,7 +88,11 @@ class TestMain:
         # Mock rate limit
         requests_mock.get(
             "https://api.github.com/rate_limit",
-            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+            json={
+                "resources": {
+                    "core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}
+                }
+            },
         )
 
         with mock.patch.object(
@@ -92,7 +101,9 @@ class TestMain:
             ["gh-pr-metrics", "--owner", "testowner", "--repo", "testrepo", "--update"],
         ):
             with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
-                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                with mock.patch.object(
+                    gh_pr_metrics.state_manager, "_state_file", state_file
+                ):
                     result = gh_pr_metrics.main()
                     assert result == 0
 
@@ -106,7 +117,9 @@ class TestMain:
             ["gh-pr-metrics", "--owner", "testowner", "--repo", "testrepo", "--update"],
         ):
             with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
-                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                with mock.patch.object(
+                    gh_pr_metrics.state_manager, "_state_file", state_file
+                ):
                     result = gh_pr_metrics.main()
                     assert result == 1  # Should fail - no state
 
@@ -116,11 +129,15 @@ class TestMain:
 
         with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all"]):
             with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
-                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                with mock.patch.object(
+                    gh_pr_metrics.state_manager, "_state_file", state_file
+                ):
                     result = gh_pr_metrics.main()
                     assert result == 1
 
-    def test_main_update_all_with_tracked_repos(self, requests_mock, tmp_path, default_config):
+    def test_main_update_all_with_tracked_repos(
+        self, requests_mock, tmp_path, default_config
+    ):
         """Test --update-all processes all tracked repositories."""
         state_file = tmp_path / "state.yaml"
         csv_file1 = tmp_path / "repo1.csv"
@@ -153,16 +170,24 @@ class TestMain:
         # Mock rate limit
         requests_mock.get(
             "https://api.github.com/rate_limit",
-            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+            json={
+                "resources": {
+                    "core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}
+                }
+            },
         )
 
         with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all"]):
             with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
-                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                with mock.patch.object(
+                    gh_pr_metrics.state_manager, "_state_file", state_file
+                ):
                     result = gh_pr_metrics.main()
                     assert result == 0
 
-    def test_main_update_all_with_partial_failure(self, requests_mock, tmp_path, default_config):
+    def test_main_update_all_with_partial_failure(
+        self, requests_mock, tmp_path, default_config
+    ):
         """Test --update-all continues after individual repo failure."""
         state_file = tmp_path / "state.yaml"
         csv_file1 = tmp_path / "repo1.csv"
@@ -194,12 +219,16 @@ class TestMain:
 
         with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all"]):
             with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
-                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                with mock.patch.object(
+                    gh_pr_metrics.state_manager, "_state_file", state_file
+                ):
                     result = gh_pr_metrics.main()
-                    # Now returns EXIT_CODE_SUCCESS because repo access errors are skipped
-                    assert result == gh_pr_metrics.EXIT_CODE_SUCCESS
+                    # Now returns EXIT_SUCCESS because repo access errors are skipped
+                    assert result == gh_pr_metrics.EXIT_SUCCESS
 
-    def test_main_update_all_skips_repo_without_csv(self, tmp_path, requests_mock, default_config):
+    def test_main_update_all_skips_repo_without_csv(
+        self, tmp_path, requests_mock, default_config
+    ):
         """Test --update-all skips repos without CSV file in state."""
         state_file = tmp_path / "state.yaml"
         csv_file = tmp_path / "repo.csv"
@@ -219,12 +248,18 @@ class TestMain:
         # Mock rate limit
         requests_mock.get(
             "https://api.github.com/rate_limit",
-            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+            json={
+                "resources": {
+                    "core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}
+                }
+            },
         )
 
         with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all"]):
             with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
-                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                with mock.patch.object(
+                    gh_pr_metrics.state_manager, "_state_file", state_file
+                ):
                     with mock.patch(
                         "gh_pr_metrics.process_repository", return_value=(0, 1, 1)
                     ) as mock_process:
@@ -233,7 +268,9 @@ class TestMain:
                         assert mock_process.call_count == 1
                         assert result == 0
 
-    def test_main_update_all_restarts_from_beginning_with_wait(self, requests_mock, default_config):
+    def test_main_update_all_restarts_from_beginning_with_wait(
+        self, requests_mock, default_config
+    ):
         """Test that update-all with --wait restarts from beginning when repo fails."""
         state_file = Path(tempfile.mkdtemp()) / "state.yaml"
 
@@ -247,7 +284,11 @@ class TestMain:
         # Mock rate limit
         requests_mock.get(
             "https://api.github.com/rate_limit",
-            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+            json={
+                "resources": {
+                    "core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}
+                }
+            },
         )
 
         call_count = 0
@@ -255,14 +296,22 @@ class TestMain:
         def process_side_effect(*args, **kwargs):
             nonlocal call_count
             call_count += 1
-            return (0, 1, 1) if call_count == 2 else (1, 0, 0)  # Fail first, succeed second
+            return (
+                (0, 1, 1) if call_count == 2 else (1, 0, 0)
+            )  # Fail first, succeed second
 
-        with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--update-all", "--wait"]):
+        with mock.patch.object(
+            sys, "argv", ["gh-pr-metrics", "--update-all", "--wait"]
+        ):
             with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
-                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                with mock.patch.object(
+                    gh_pr_metrics.state_manager, "_state_file", state_file
+                ):
                     with mock.patch("gh_pr_metrics.process_repository") as mock_process:
                         with mock.patch.object(
-                            gh_pr_metrics.quota_manager, "wait_for_reset", return_value=True
+                            gh_pr_metrics.quota_manager,
+                            "wait_for_reset",
+                            return_value=True,
                         ):
                             mock_process.side_effect = process_side_effect
                             result = gh_pr_metrics.main()
@@ -276,7 +325,9 @@ class TestMain:
                 assert mock_process.call_args_list[1][0][1] == "repo1"
                 assert result == 0  # Success on retry
 
-    def test_update_all_reloads_state_on_restart(self, tmp_path, requests_mock, default_config):
+    def test_update_all_reloads_state_on_restart(
+        self, tmp_path, requests_mock, default_config
+    ):
         """
         Test that update-all reloads state file on restart after quota reset.
 
@@ -316,7 +367,11 @@ class TestMain:
         # Mock rate limit
         requests_mock.get(
             "https://api.github.com/rate_limit",
-            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+            json={
+                "resources": {
+                    "core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}
+                }
+            },
         )
 
         # Track processing order
@@ -330,9 +385,13 @@ class TestMain:
             if call_count == 1:
                 assert owner == "testowner" and repo == "repo1"
                 # Update state file: repo1 now has newest timestamp (1 hour ago)
-                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                with mock.patch.object(
+                    gh_pr_metrics.state_manager, "_state_file", state_file
+                ):
                     repo1_new = (now - timedelta(hours=1)).replace(tzinfo=None)
-                    gh_pr_metrics.state_manager.update_repo(owner, repo, repo1_new, str(csv1))
+                    gh_pr_metrics.state_manager.update_repo(
+                        owner, repo, repo1_new, str(csv1)
+                    )
                 return 0, 1, 1
 
             # Second: repo2 (now oldest after repo1 update) - fail to trigger restart
@@ -356,12 +415,16 @@ class TestMain:
 
             return 0, 1, 1
 
-        with mock.patch("gh_pr_metrics.process_repository", side_effect=mock_process_repository):
+        with mock.patch(
+            "gh_pr_metrics.process_repository", side_effect=mock_process_repository
+        ):
             with mock.patch("gh_pr_metrics.load_config", return_value=default_config):
                 with mock.patch.object(
                     gh_pr_metrics.quota_manager, "wait_for_reset", return_value=True
                 ):
-                    with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                    with mock.patch.object(
+                        gh_pr_metrics.state_manager, "_state_file", state_file
+                    ):
                         with mock.patch.object(
                             sys,
                             "argv",
@@ -430,12 +493,17 @@ class TestProcessRepository:
                     return False, 0  # Second chunk: exhausted
 
             with mock.patch.object(
-                gh_pr_metrics.quota_manager, "check_sufficient", side_effect=mock_check_sufficient
+                gh_pr_metrics.quota_manager,
+                "check_sufficient",
+                side_effect=mock_check_sufficient,
             ):
-                with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+                with mock.patch.object(
+                    gh_pr_metrics.state_manager, "_state_file", state_file
+                ):
                     # Mock process_pr to succeed quickly
                     with mock.patch(
-                        "gh_pr_metrics.process_pr", return_value={"pr_number": 1, "title": "test"}
+                        "gh_pr_metrics.process_pr",
+                        return_value={"pr_number": 1, "title": "test"},
                     ):
                         exit_code, chunks_completed, total_chunks = (
                             gh_pr_metrics.process_repository(
@@ -471,7 +539,11 @@ class TestProcessRepository:
 
         requests_mock.get(
             "https://api.github.com/rate_limit",
-            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+            json={
+                "resources": {
+                    "core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}
+                }
+            },
         )
 
         gh_pr_metrics.github_client = gh_pr_metrics.GitHubClient(
@@ -479,16 +551,18 @@ class TestProcessRepository:
         )
 
         with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
-            exit_code, chunks_completed, total_chunks = gh_pr_metrics.process_repository(
-                owner="test",
-                repo="test",
-                output_file=str(output_file),
-                start_date=start_date,
-                end_date=end_date,
-                token="fake",
-                workers=1,
-                config=default_config,
-                merge_mode=False,
+            exit_code, chunks_completed, total_chunks = (
+                gh_pr_metrics.process_repository(
+                    owner="test",
+                    repo="test",
+                    output_file=str(output_file),
+                    start_date=start_date,
+                    end_date=end_date,
+                    token="fake",
+                    workers=1,
+                    config=default_config,
+                    merge_mode=False,
+                )
             )
 
             # Should succeed with no PRs
@@ -503,7 +577,9 @@ class TestProcessRepository:
 class TestUpdateSinglePR:
     """Test update_single_pr function behavior."""
 
-    def test_update_single_pr_updates_existing_pr(self, requests_mock, tmp_path, default_config):
+    def test_update_single_pr_updates_existing_pr(
+        self, requests_mock, tmp_path, default_config
+    ):
         """Test that update_single_pr updates an existing PR in CSV."""
         output_file = tmp_path / "output.csv"
 
@@ -541,7 +617,11 @@ class TestUpdateSinglePR:
         # Mock rate limit
         requests_mock.get(
             "https://api.github.com/rate_limit",
-            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+            json={
+                "resources": {
+                    "core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}
+                }
+            },
         )
 
         # Mock timeline, comments, reviews
@@ -600,7 +680,9 @@ class TestUpdateSinglePR:
         assert pr_456 is not None
         assert pr_456["title"] == "Another PR"
 
-    def test_update_single_pr_adds_new_pr(self, requests_mock, tmp_path, default_config):
+    def test_update_single_pr_adds_new_pr(
+        self, requests_mock, tmp_path, default_config
+    ):
         """Test that update_single_pr adds a new PR if not in CSV."""
         output_file = tmp_path / "output.csv"
 
@@ -636,7 +718,11 @@ class TestUpdateSinglePR:
         # Mock rate limit
         requests_mock.get(
             "https://api.github.com/rate_limit",
-            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+            json={
+                "resources": {
+                    "core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}
+                }
+            },
         )
 
         # Mock timeline, comments, reviews
@@ -708,7 +794,9 @@ class TestUpdateSinglePR:
 
         assert exit_code == 1
 
-    def test_update_single_pr_fails_on_api_error(self, requests_mock, tmp_path, default_config):
+    def test_update_single_pr_fails_on_api_error(
+        self, requests_mock, tmp_path, default_config
+    ):
         """Test that update_single_pr fails gracefully on API error."""
         output_file = tmp_path / "output.csv"
 
@@ -731,7 +819,11 @@ class TestUpdateSinglePR:
         # Mock rate limit
         requests_mock.get(
             "https://api.github.com/rate_limit",
-            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+            json={
+                "resources": {
+                    "core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}
+                }
+            },
         )
 
         # Initialize github_client

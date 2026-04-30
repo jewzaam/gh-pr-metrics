@@ -30,7 +30,10 @@ class TestStateManagement:
         with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
             state = gh_pr_metrics.state_manager.load()
             assert "https://github.com/owner/repo" in state
-            assert state["https://github.com/owner/repo"]["timestamp"] == "2024-01-01T00:00:00"
+            assert (
+                state["https://github.com/owner/repo"]["timestamp"]
+                == "2024-01-01T00:00:00"
+            )
             assert state["https://github.com/owner/repo"]["csv_file"] == "metrics.csv"
 
     def test_save_state_file(self, tmp_path):
@@ -152,7 +155,9 @@ class TestStateManagement:
 
         with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
             timestamp = datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
-            gh_pr_metrics.state_manager.update_repo("owner", "repo", timestamp, "metrics.csv")
+            gh_pr_metrics.state_manager.update_repo(
+                "owner", "repo", timestamp, "metrics.csv"
+            )
 
             # Verify state was saved (without timezone component)
             state = gh_pr_metrics.state_manager.load()
@@ -168,11 +173,15 @@ class TestStateManagement:
         with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
             # Add first repo
             timestamp1 = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
-            gh_pr_metrics.state_manager.update_repo("owner1", "repo1", timestamp1, "repo1.csv")
+            gh_pr_metrics.state_manager.update_repo(
+                "owner1", "repo1", timestamp1, "repo1.csv"
+            )
 
             # Add second repo
             timestamp2 = datetime(2024, 1, 2, 0, 0, 0, tzinfo=timezone.utc)
-            gh_pr_metrics.state_manager.update_repo("owner2", "repo2", timestamp2, "repo2.csv")
+            gh_pr_metrics.state_manager.update_repo(
+                "owner2", "repo2", timestamp2, "repo2.csv"
+            )
 
             # Verify both are in state
             state = gh_pr_metrics.state_manager.load()
@@ -188,11 +197,15 @@ class TestStateManagement:
         with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
             # First update
             timestamp1 = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
-            gh_pr_metrics.state_manager.update_repo("owner", "repo", timestamp1, "old.csv")
+            gh_pr_metrics.state_manager.update_repo(
+                "owner", "repo", timestamp1, "old.csv"
+            )
 
             # Second update (overwrites)
             timestamp2 = datetime(2024, 1, 15, 0, 0, 0, tzinfo=timezone.utc)
-            gh_pr_metrics.state_manager.update_repo("owner", "repo", timestamp2, "new.csv")
+            gh_pr_metrics.state_manager.update_repo(
+                "owner", "repo", timestamp2, "new.csv"
+            )
 
             # Verify only latest timestamp and file are stored
             state = gh_pr_metrics.state_manager.load()
@@ -349,7 +362,11 @@ class TestStateManagement:
         )
         requests_mock.get(
             "https://api.github.com/rate_limit",
-            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+            json={
+                "resources": {
+                    "core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}
+                }
+            },
         )
 
         # Initialize github_client for the test
@@ -397,7 +414,7 @@ class TestStateManagement:
         Test that process_repository handles repo access errors correctly.
 
         Verifies:
-        1. Returns EXIT_CODE_ERROR_REPO_ACCESS for 404/permission errors
+        1. Returns EXIT_ERROR_REPO_ACCESS for 404/permission errors
         2. Does NOT update state file timestamp (critical - prevents marking as "processed")
         """
         state_file = tmp_path / "state.yaml"
@@ -415,11 +432,17 @@ class TestStateManagement:
         )
 
         # Mock request that will fail (404 error)
-        requests_mock.get("https://api.github.com/repos/testowner/testrepo/pulls", status_code=404)
+        requests_mock.get(
+            "https://api.github.com/repos/testowner/testrepo/pulls", status_code=404
+        )
 
         requests_mock.get(
             "https://api.github.com/rate_limit",
-            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+            json={
+                "resources": {
+                    "core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}
+                }
+            },
         )
 
         gh_pr_metrics.github_client = gh_pr_metrics.GitHubClient(
@@ -439,8 +462,8 @@ class TestStateManagement:
                 merge_mode=False,
             )
 
-            # Should fail with EXIT_CODE_ERROR_REPO_ACCESS (repo access error, not quota)
-            assert exit_code == gh_pr_metrics.EXIT_CODE_ERROR_REPO_ACCESS
+            # Should fail with EXIT_ERROR_REPO_ACCESS (repo access error, not quota)
+            assert exit_code == gh_pr_metrics.EXIT_ERROR_REPO_ACCESS
             assert chunks_completed == 0  # Initialized to 0
             assert total_chunks_fetched == 0  # Error before fetch completed
 
@@ -521,7 +544,9 @@ class TestStateManagement:
     def test_mark_pr_succeeded_nonexistent_pr(self, tmp_path):
         """Test marking non-failed PR as succeeded doesn't error."""
         state_file = tmp_path / "state.yaml"
-        state_file.write_text("https://github.com/owner/repo:\n" "  failed_prs:\n" "  - 111\n")
+        state_file.write_text(
+            "https://github.com/owner/repo:\n" "  failed_prs:\n" "  - 111\n"
+        )
 
         with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
             # Should not error
@@ -542,7 +567,11 @@ class TestStateManagement:
         """Test getting failed PRs when some exist."""
         state_file = tmp_path / "state.yaml"
         state_file.write_text(
-            "https://github.com/owner/repo:\n" "  failed_prs:\n" "  - 10\n" "  - 20\n" "  - 30\n"
+            "https://github.com/owner/repo:\n"
+            "  failed_prs:\n"
+            "  - 10\n"
+            "  - 20\n"
+            "  - 30\n"
         )
 
         with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
@@ -584,7 +613,9 @@ class TestStateManagement:
                 gh_pr_metrics.state_manager.mark_pr_failed("owner", "repo", pr_num)
 
             with ThreadPoolExecutor(max_workers=10) as executor:
-                futures = [executor.submit(mark_failed, pr_num) for pr_num in pr_numbers]
+                futures = [
+                    executor.submit(mark_failed, pr_num) for pr_num in pr_numbers
+                ]
                 for future in as_completed(futures):
                     future.result()  # Wait for completion
 
@@ -593,7 +624,9 @@ class TestStateManagement:
             assert len(failed_prs) == 20
             assert set(failed_prs) == set(pr_numbers)
 
-    def test_process_repository_retries_failed_prs(self, tmp_path, requests_mock, default_config):
+    def test_process_repository_retries_failed_prs(
+        self, tmp_path, requests_mock, default_config
+    ):
         """
         Test that process_repository correctly retries failed PRs from state file.
 
@@ -654,28 +687,38 @@ class TestStateManagement:
 
             # Mock PR details endpoints
             requests_mock.get(
-                f"https://api.github.com/repos/testowner/testrepo/issues/{pr_num}/timeline", json=[]
+                f"https://api.github.com/repos/testowner/testrepo/issues/{pr_num}/timeline",
+                json=[],
             )
             requests_mock.get(
-                f"https://api.github.com/repos/testowner/testrepo/issues/{pr_num}/events", json=[]
+                f"https://api.github.com/repos/testowner/testrepo/issues/{pr_num}/events",
+                json=[],
             )
             requests_mock.get(
-                f"https://api.github.com/repos/testowner/testrepo/issues/{pr_num}/comments", json=[]
+                f"https://api.github.com/repos/testowner/testrepo/issues/{pr_num}/comments",
+                json=[],
             )
             requests_mock.get(
-                f"https://api.github.com/repos/testowner/testrepo/pulls/{pr_num}/reviews", json=[]
+                f"https://api.github.com/repos/testowner/testrepo/pulls/{pr_num}/reviews",
+                json=[],
             )
             requests_mock.get(
-                f"https://api.github.com/repos/testowner/testrepo/pulls/{pr_num}/comments", json=[]
+                f"https://api.github.com/repos/testowner/testrepo/pulls/{pr_num}/comments",
+                json=[],
             )
             requests_mock.get(
-                f"https://api.github.com/repos/testowner/testrepo/pulls/{pr_num}/commits", json=[]
+                f"https://api.github.com/repos/testowner/testrepo/pulls/{pr_num}/commits",
+                json=[],
             )
 
         # Mock rate limit
         requests_mock.get(
             "https://api.github.com/rate_limit",
-            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+            json={
+                "resources": {
+                    "core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}
+                }
+            },
         )
 
         # Initialize github_client for the test
@@ -697,7 +740,7 @@ class TestStateManagement:
             )
 
             # Verify success
-            assert exit_code == gh_pr_metrics.EXIT_CODE_SUCCESS
+            assert exit_code == gh_pr_metrics.EXIT_SUCCESS
             assert chunks_completed == 1
 
             # Verify output file was created and contains both retried PRs
@@ -768,7 +811,11 @@ class TestStateManagement:
         # Mock rate limit
         requests_mock.get(
             "https://api.github.com/rate_limit",
-            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+            json={
+                "resources": {
+                    "core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}
+                }
+            },
         )
 
         # Initialize github_client for the test
@@ -790,10 +837,12 @@ class TestStateManagement:
             )
 
             # Processing should still succeed even if retry fails
-            assert exit_code == gh_pr_metrics.EXIT_CODE_SUCCESS
+            assert exit_code == gh_pr_metrics.EXIT_SUCCESS
 
             # Verify the failed PR is still in state (retry failed)
             state = gh_pr_metrics.state_manager.load()
             repo_key = "https://github.com/testowner/testrepo"
             failed_prs = state.get(repo_key, {}).get("failed_prs", [])
-            assert 999 in failed_prs, "Failed PR should remain in state when retry fails"
+            assert (
+                999 in failed_prs
+            ), "Failed PR should remain in state when retry fails"

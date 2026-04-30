@@ -46,7 +46,9 @@ class TestArgumentParsing:
     def test_parse_arguments_with_time_range(self):
         """Test parsing with start and end timestamps."""
         with mock.patch.object(
-            sys, "argv", ["gh-pr-metrics", "--start", "2024-01-01", "--end", "2024-12-31"]
+            sys,
+            "argv",
+            ["gh-pr-metrics", "--start", "2024-01-01", "--end", "2024-12-31"],
         ):
             args = gh_pr_metrics.parse_arguments()
             assert args.start == "2024-01-01"
@@ -72,7 +74,9 @@ class TestArgumentParsing:
 
     def test_parse_arguments_with_config(self):
         """Test parsing with custom config path."""
-        with mock.patch.object(sys, "argv", ["gh-pr-metrics", "--config", "/path/to/config.yaml"]):
+        with mock.patch.object(
+            sys, "argv", ["gh-pr-metrics", "--config", "/path/to/config.yaml"]
+        ):
             args = gh_pr_metrics.parse_arguments()
             assert args.config == "/path/to/config.yaml"
 
@@ -99,6 +103,19 @@ class TestArgumentParsing:
         with mock.patch.object(sys, "argv", ["gh-pr-metrics"]):
             args = gh_pr_metrics.parse_arguments()
             assert args.pr is None
+
+
+class TestExitCodes:
+    """Test exit code constants follow standard naming."""
+
+    def test_exit_success_is_zero(self):
+        assert gh_pr_metrics.EXIT_SUCCESS == 0
+
+    def test_exit_error_is_one(self):
+        assert gh_pr_metrics.EXIT_ERROR == 1
+
+    def test_exit_error_repo_access_is_two(self):
+        assert gh_pr_metrics.EXIT_ERROR_REPO_ACCESS == 2
 
 
 class TestLoggingSetup:

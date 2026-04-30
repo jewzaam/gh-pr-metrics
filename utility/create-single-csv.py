@@ -19,7 +19,7 @@ def safe_float(value):
         return 0.0
     try:
         return float(value)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return 0.0
 
 
@@ -83,7 +83,9 @@ def create_rollup(rollup_data):
                 "pr_count_with_ai_bots": with_ai_bots,
                 "pr_count_without_ai_bots": without_ai_bots,
                 # Average days metrics - all and by status
-                "avg_days_open_all": round(data["days_open_sum"] / total, 2) if total > 0 else 0,
+                "avg_days_open_all": (
+                    round(data["days_open_sum"] / total, 2) if total > 0 else 0
+                ),
                 "avg_days_open_merged": (
                     round(data["days_open_merged_sum"] / merged, 2) if merged > 0 else 0
                 ),
@@ -105,7 +107,9 @@ def create_rollup(rollup_data):
                     round(data["days_in_review_sum"] / total, 2) if total > 0 else 0
                 ),
                 "avg_days_in_review_merged": (
-                    round(data["days_in_review_merged_sum"] / merged, 2) if merged > 0 else 0
+                    round(data["days_in_review_merged_sum"] / merged, 2)
+                    if merged > 0
+                    else 0
                 ),
                 "avg_days_in_review_with_ai_bots": (
                     round(data["days_in_review_with_ai_bots_sum"] / with_ai_bots, 2)
@@ -113,7 +117,9 @@ def create_rollup(rollup_data):
                     else 0
                 ),
                 "avg_days_in_review_without_ai_bots": (
-                    round(data["days_in_review_without_ai_bots_sum"] / without_ai_bots, 2)
+                    round(
+                        data["days_in_review_without_ai_bots_sum"] / without_ai_bots, 2
+                    )
                     if without_ai_bots > 0
                     else 0
                 ),
@@ -123,9 +129,13 @@ def create_rollup(rollup_data):
                 "total_ai_bot_comments": data["total_ai_bot_comments"],
                 "total_changes_requested": data["total_changes_requested"],
                 "total_approvals": data["total_approvals"],
-                "avg_comments_per_pr": round(data["total_comments"] / total, 2) if total > 0 else 0,
+                "avg_comments_per_pr": (
+                    round(data["total_comments"] / total, 2) if total > 0 else 0
+                ),
                 "avg_non_ai_bot_comments_per_pr": (
-                    round(data["total_non_ai_bot_comments"] / total, 2) if total > 0 else 0
+                    round(data["total_non_ai_bot_comments"] / total, 2)
+                    if total > 0
+                    else 0
                 ),
                 # Code change totals
                 "total_lines_added": data["total_lines_added"],
@@ -241,7 +251,9 @@ def main():
                         status = row.get("status", "").lower()
                         days_open = safe_float(row.get("days_open"))
                         days_in_review = safe_float(row.get("days_in_review"))
-                        ai_bot_count = int(safe_float(row.get("ai_bot_comment_count", 0)))
+                        ai_bot_count = int(
+                            safe_float(row.get("ai_bot_comment_count", 0))
+                        )
                         has_ai_bots = ai_bot_count > 0
 
                         # Count PRs by status
@@ -273,7 +285,9 @@ def main():
                         data["days_in_review_sum"] += days_in_review
 
                         # Aggregate comment/review metrics
-                        data["total_comments"] += int(safe_float(row.get("total_comment_count", 0)))
+                        data["total_comments"] += int(
+                            safe_float(row.get("total_comment_count", 0))
+                        )
                         data["total_non_ai_bot_comments"] += int(
                             safe_float(row.get("non_ai_bot_comment_count", 0))
                         )
@@ -281,12 +295,20 @@ def main():
                         data["total_changes_requested"] += int(
                             safe_float(row.get("changes_requested_count", 0))
                         )
-                        data["total_approvals"] += int(safe_float(row.get("approval_count", 0)))
+                        data["total_approvals"] += int(
+                            safe_float(row.get("approval_count", 0))
+                        )
 
                         # Aggregate code change metrics
-                        data["total_lines_added"] += int(safe_float(row.get("lines_added", 0)))
-                        data["total_lines_deleted"] += int(safe_float(row.get("lines_deleted", 0)))
-                        data["total_files_changed"] += int(safe_float(row.get("files_changed", 0)))
+                        data["total_lines_added"] += int(
+                            safe_float(row.get("lines_added", 0))
+                        )
+                        data["total_lines_deleted"] += int(
+                            safe_float(row.get("lines_deleted", 0))
+                        )
+                        data["total_files_changed"] += int(
+                            safe_float(row.get("files_changed", 0))
+                        )
                         data["total_line_changes"] += int(
                             safe_float(row.get("total_line_changes", 0))
                         )

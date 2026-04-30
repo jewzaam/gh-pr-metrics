@@ -13,6 +13,7 @@ import csv
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -204,7 +205,12 @@ class StateManager:
 
     @with_lock
     def load(self) -> Dict[str, Any]:
-        """Load state file containing last update dates per repo. Thread-safe."""
+        """Load state file containing last update dates per repo. Thread-safe.
+
+        On parse failure, attempts recovery from .bak backup file.
+        Raises RuntimeError if both primary and backup are corrupt.
+        Returns empty dict only when no state file exists (fresh start).
+        """
         if not self._state_file.exists():
             return {}
 
@@ -215,14 +221,54 @@ class StateManager:
         except Exception as e:
             if self._logger:
                 self._logger.warning("Failed to load state file %s: %s", self._state_file, e)
-            return {}
+
+            backup_path = self._state_file.with_suffix(".yaml.bak")
+            if backup_path.exists():
+                try:
+                    with open(backup_path, "r", encoding="utf-8") as f:
+                        data = yaml.safe_load(f) or {}
+                    if self._logger:
+                        self._logger.warning("Recovered state from backup file %s", backup_path)
+                    return data
+                except Exception as backup_e:
+                    if self._logger:
+                        self._logger.error("Backup state file also corrupt: %s", backup_e)
+
+            raise RuntimeError(
+                f"State file {self._state_file} is corrupt and no valid backup exists. "
+                f"Original error: {e}"
+            )
 
     @with_lock
     def save(self, state: Dict[str, Any]) -> None:
-        """Save state file with last update dates per repo. Thread-safe."""
+        """Save state file with last update dates per repo. Thread-safe.
+
+        Uses atomic write (temp file + rename) to prevent corruption from
+        interrupted writes. Creates a .bak backup before each overwrite.
+        """
         try:
-            with open(self._state_file, "w", encoding="utf-8") as f:
-                yaml.safe_dump(state, f, default_flow_style=False, sort_keys=True)
+            state_dir = self._state_file.parent
+            temp_fd, temp_path = tempfile.mkstemp(
+                dir=str(state_dir),
+                prefix=".tmp_state_",
+                suffix=".yaml",
+            )
+
+            try:
+                with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
+                    yaml.safe_dump(state, f, default_flow_style=False, sort_keys=True)
+
+                if self._state_file.exists():
+                    backup_path = self._state_file.with_suffix(".yaml.bak")
+                    shutil.copy2(str(self._state_file), str(backup_path))
+
+                os.rename(temp_path, str(self._state_file))
+            except Exception:
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+                raise
 
             if self._logger:
                 self._logger.debug("Saved state file to %s", self._state_file)

@@ -52,6 +52,100 @@ class TestStateManagement:
             assert "2024-01-01T00:00:00" in content
             assert "metrics.csv" in content
 
+    def test_save_creates_backup(self, tmp_path):
+        """Test that save creates .bak backup on second write."""
+        state_file = tmp_path / "state.yaml"
+        backup_file = tmp_path / "state.yaml.bak"
+
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            state_v1 = {
+                "https://github.com/owner/repo1": {
+                    "timestamp": "2024-01-01T00:00:00",
+                    "csv_file": "repo1.csv",
+                }
+            }
+            gh_pr_metrics.state_manager.save(state_v1)
+            assert not backup_file.exists()
+
+            state_v2 = {
+                "https://github.com/owner/repo1": {
+                    "timestamp": "2024-01-02T00:00:00",
+                    "csv_file": "repo1.csv",
+                },
+                "https://github.com/owner/repo2": {
+                    "timestamp": "2024-01-02T00:00:00",
+                    "csv_file": "repo2.csv",
+                },
+            }
+            gh_pr_metrics.state_manager.save(state_v2)
+            assert backup_file.exists()
+            backup_content = backup_file.read_text()
+            assert "2024-01-01T00:00:00" in backup_content
+            assert "repo2" not in backup_content
+
+    def test_save_atomic_no_corruption_on_failure(self, tmp_path):
+        """Test that original file is intact if temp write fails."""
+        state_file = tmp_path / "state.yaml"
+
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            original_state = {
+                "https://github.com/owner/repo": {
+                    "timestamp": "2024-01-01T00:00:00",
+                    "csv_file": "metrics.csv",
+                }
+            }
+            gh_pr_metrics.state_manager.save(original_state)
+
+            with mock.patch("yaml.safe_dump", side_effect=Exception("write failure")):
+                import pytest
+
+                with pytest.raises(Exception, match="write failure"):
+                    gh_pr_metrics.state_manager.save({"bad": "data"})
+
+            content = state_file.read_text()
+            assert "https://github.com/owner/repo" in content
+            assert "2024-01-01T00:00:00" in content
+
+    def test_load_corrupt_with_backup_recovery(self, tmp_path):
+        """Test that corrupt primary file recovers from .bak backup."""
+        state_file = tmp_path / "state.yaml"
+        backup_file = tmp_path / "state.yaml.bak"
+
+        backup_file.write_text(
+            "https://github.com/owner/repo:\n  csv_file: metrics.csv\n"
+            "  timestamp: '2024-01-01T00:00:00'\n"
+        )
+        state_file.write_text("corrupt: yaml: content: [broken")
+
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            state = gh_pr_metrics.state_manager.load()
+            assert "https://github.com/owner/repo" in state
+            assert state["https://github.com/owner/repo"]["csv_file"] == "metrics.csv"
+
+    def test_load_corrupt_no_backup_raises(self, tmp_path):
+        """Test that corrupt primary with no backup raises RuntimeError."""
+        import pytest
+
+        state_file = tmp_path / "state.yaml"
+        state_file.write_text("corrupt: yaml: content: [broken")
+
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            with pytest.raises(RuntimeError, match="corrupt and no valid backup"):
+                gh_pr_metrics.state_manager.load()
+
+    def test_load_corrupt_both_files_raises(self, tmp_path):
+        """Test that corrupt primary and corrupt backup raises RuntimeError."""
+        import pytest
+
+        state_file = tmp_path / "state.yaml"
+        backup_file = tmp_path / "state.yaml.bak"
+        state_file.write_text("corrupt: yaml: [broken")
+        backup_file.write_text("also: corrupt: [broken")
+
+        with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            with pytest.raises(RuntimeError, match="corrupt and no valid backup"):
+                gh_pr_metrics.state_manager.load()
+
     def test_update_state_file(self, tmp_path):
         """Test updating state file with new timestamp."""
         state_file = tmp_path / "state.yaml"

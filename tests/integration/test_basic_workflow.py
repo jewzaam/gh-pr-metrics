@@ -183,7 +183,10 @@ class TestBasicWorkflow:
         assert config.is_ai_bot("copilot[bot]", "") is True
 
         # Test conditional bot with matching content
-        assert config.is_ai_bot("github-actions[bot]", "Code Review Summary: All good") is True
+        assert (
+            config.is_ai_bot("github-actions[bot]", "Code Review Summary: All good")
+            is True
+        )
 
         # Test conditional bot without matching content
         assert config.is_ai_bot("github-actions[bot]", "Deployment complete") is False
@@ -257,7 +260,11 @@ class TestBasicWorkflow:
         assert gh_pr_metrics.determine_pr_status(draft_pr) == "draft"
 
         # Merged PR
-        merged_pr = {"draft": False, "merged_at": "2024-01-01T00:00:00Z", "state": "closed"}
+        merged_pr = {
+            "draft": False,
+            "merged_at": "2024-01-01T00:00:00Z",
+            "state": "closed",
+        }
         assert gh_pr_metrics.determine_pr_status(merged_pr) == "merged"
 
         # Closed (not merged) PR

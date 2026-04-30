@@ -18,7 +18,11 @@ class TestOutputPattern:
         # Mock rate limit
         requests_mock.get(
             "https://api.github.com/rate_limit",
-            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+            json={
+                "resources": {
+                    "core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}
+                }
+            },
         )
 
         # Mock empty PR list
@@ -42,7 +46,9 @@ class TestOutputPattern:
                 "2024-01-01",
             ],
         ):
-            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            with mock.patch.object(
+                gh_pr_metrics.state_manager, "_state_file", state_file
+            ):
                 gh_pr_metrics.github_client = gh_pr_metrics.GitHubClient(
                     "fake", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
                 )
@@ -57,7 +63,10 @@ class TestOutputPattern:
                 repo_key = "https://github.com/testowner/testrepo"
                 assert repo_key in state
                 # Should have expanded to testowner_testrepo.csv, not literal {owner}_{repo}.csv
-                assert state[repo_key]["csv_file"] == f"{output_dir}/testowner_testrepo.csv"
+                assert (
+                    state[repo_key]["csv_file"]
+                    == f"{output_dir}/testowner_testrepo.csv"
+                )
 
     def test_init_mode_expands_output_pattern(self, tmp_path, requests_mock):
         """Test that init mode expands output patterns (existing behavior)."""
@@ -67,7 +76,11 @@ class TestOutputPattern:
         # Mock rate limit
         requests_mock.get(
             "https://api.github.com/rate_limit",
-            json={"resources": {"core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}}},
+            json={
+                "resources": {
+                    "core": {"limit": 5000, "remaining": 4999, "reset": 1699999999}
+                }
+            },
         )
 
         # Mock repo validation
@@ -92,7 +105,9 @@ class TestOutputPattern:
                 "2024-01-01",
             ],
         ):
-            with mock.patch.object(gh_pr_metrics.state_manager, "_state_file", state_file):
+            with mock.patch.object(
+                gh_pr_metrics.state_manager, "_state_file", state_file
+            ):
                 result = gh_pr_metrics.main()
                 assert result == 0
 
@@ -100,22 +115,31 @@ class TestOutputPattern:
                 state = gh_pr_metrics.state_manager.load()
                 repo_key = "https://github.com/testowner/testrepo"
                 assert repo_key in state
-                assert state[repo_key]["csv_file"] == f"{output_dir}/testowner-testrepo.csv"
+                assert (
+                    state[repo_key]["csv_file"]
+                    == f"{output_dir}/testowner-testrepo.csv"
+                )
 
     def test_expand_output_pattern_function(self):
         """Test the expand_output_pattern utility function."""
         assert (
-            gh_pr_metrics.expand_output_pattern("data/{owner}-{repo}.csv", "ansible", "handbook")
+            gh_pr_metrics.expand_output_pattern(
+                "data/{owner}-{repo}.csv", "ansible", "handbook"
+            )
             == "data/ansible-handbook.csv"
         )
 
         assert (
-            gh_pr_metrics.expand_output_pattern("data/{owner}_{repo}.csv", "test", "repo")
+            gh_pr_metrics.expand_output_pattern(
+                "data/{owner}_{repo}.csv", "test", "repo"
+            )
             == "data/test_repo.csv"
         )
 
         assert (
-            gh_pr_metrics.expand_output_pattern("{owner}/{repo}/metrics.csv", "org", "project")
+            gh_pr_metrics.expand_output_pattern(
+                "{owner}/{repo}/metrics.csv", "org", "project"
+            )
             == "org/project/metrics.csv"
         )
 

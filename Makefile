@@ -2,18 +2,41 @@
 # GitHub Pull Request Metrics Tool Makefile
 # ==========================================
 
-# Include common variables first
-include make/common.mk
+# Python virtual environment
+VENV_DIR ?= .venv
+PYTHON ?= $(VENV_DIR)/bin/python
+
+# System interpreter for venv creation only. CI overrides to `python`
+# so the venv is pinned to the matrix Python from setup-python.
+PY_SYS ?= python3
+
+VENV_PIP := $(VENV_DIR)/bin/pip
+VENV_UV := $(VENV_DIR)/bin/uv
+
+# Coverage settings
+COVERAGE_THRESHOLD ?= 75
+
+# Colors for output
+BLUE := \033[34m
+GREEN := \033[32m
+YELLOW := \033[33m
+RED := \033[31m
+RESET := \033[0m
 
 # Include modular makefiles
-include make/env.mk
-include make/test.mk
-include make/lint.mk
+-include make/env.mk
+-include make/test.mk
 
-.DEFAULT_GOAL := all
-.PHONY: help all all-data reprocess
+.DEFAULT_GOAL := check
+.PHONY: help check all all-data reprocess format
 
-all: test-unit coverage lint format ## Run all checks (default target)
+check: test-format test-lint test-typecheck test-unit test-coverage ## Run all quality checks (read-only)
+
+all: check format ## Run all checks and format code
+
+format: install-dev ## Format code with black
+	@$(PYTHON) -m black src/ tests/ utility/
+	@printf "$(GREEN)✅ Code formatted$(RESET)\n"
 
 help: ## Display this help message
 	@echo "GitHub Pull Request Metrics Tool"
@@ -21,7 +44,7 @@ help: ## Display this help message
 	@echo ""
 	@echo "Available targets:"
 	@echo ""
-	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-32s\033[0m %s\n", $$1, $$2}'
 
 update: ## Fetch/update PR data for all tracked repositories
 	@GITHUB_TOKEN=$(gh auth token) gh-pr-metrics --workers 16 --update-all

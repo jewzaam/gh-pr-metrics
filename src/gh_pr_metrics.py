@@ -12,6 +12,7 @@ import argparse
 import csv
 import json
 import logging
+import logging.handlers
 import os
 import shutil
 import subprocess
@@ -45,14 +46,16 @@ from utils import format_timestamp_local
 __version__ = "0.1.0"
 
 # Exit codes
-EXIT_CODE_SUCCESS = 0  # Successful completion
-EXIT_CODE_ERROR_QUOTA = 1  # Quota exhausted or other critical error requiring retry/wait
-EXIT_CODE_ERROR_REPO_ACCESS = 2  # Repo not found or insufficient permissions (skip and continue)
+EXIT_SUCCESS = 0  # Successful completion
+EXIT_ERROR = 1  # Quota exhausted or other critical error requiring retry/wait
+EXIT_ERROR_REPO_ACCESS = (
+    2  # Repo not found or insufficient permissions (skip and continue)
+)
 
 # Constants
 DEFAULT_WORKERS = 4
 DEFAULT_RAW_DATA_DIR = "data/raw"
-STATE_FILE = Path.home() / ".gh-pr-metrics-state.yaml"
+STATE_FILE = (Path.home() / ".gh-pr-metrics-state.yaml").resolve()
 PR_NUMBER_FIELD = "pr_number"
 MAX_CHUNK_DAYS = 30  # Maximum days to process in a single chunk
 
@@ -79,10 +82,14 @@ class ConditionalBotConfig:
 
         if self.match_any:
             # Any pattern match = AI
-            return any(re.search(pattern, comment_body) for pattern in self.content_patterns)
+            return any(
+                re.search(pattern, comment_body) for pattern in self.content_patterns
+            )
         else:
             # All patterns required = AI
-            return all(re.search(pattern, comment_body) for pattern in self.content_patterns)
+            return all(
+                re.search(pattern, comment_body) for pattern in self.content_patterns
+            )
 
 
 class Config:
@@ -165,7 +172,11 @@ def load_config(config_path: str) -> Config:
 
         # Validate output_pattern has placeholders if set
         output_pattern = config_dict.get("output_pattern")
-        if output_pattern and "{owner}" not in output_pattern and "{repo}" not in output_pattern:
+        if (
+            output_pattern
+            and "{owner}" not in output_pattern
+            and "{repo}" not in output_pattern
+        ):
             raise ValueError(
                 f"Invalid output_pattern '{output_pattern}': "
                 "must contain {{owner}} and/or {{repo}} placeholders"
@@ -197,7 +208,7 @@ class StateManager:
     Thread-safe via @with_lock decorator on all public methods.
     """
 
-    def __init__(self, state_file_path: Path = None, logger=None):
+    def __init__(self, state_file_path: Optional[Path] = None, logger=None):
         """Initialize state manager with path to state file and logger."""
         self._state_file = state_file_path or STATE_FILE
         self._logger = logger
@@ -220,7 +231,9 @@ class StateManager:
                 return data
         except Exception as e:
             if self._logger:
-                self._logger.warning("Failed to load state file %s: %s", self._state_file, e)
+                self._logger.warning(
+                    "Failed to load state file %s: %s", self._state_file, e
+                )
 
             backup_path = self._state_file.with_suffix(".yaml.bak")
             if backup_path.exists():
@@ -228,11 +241,15 @@ class StateManager:
                     with open(backup_path, "r", encoding="utf-8") as f:
                         data = yaml.safe_load(f) or {}
                     if self._logger:
-                        self._logger.warning("Recovered state from backup file %s", backup_path)
+                        self._logger.warning(
+                            "Recovered state from backup file %s", backup_path
+                        )
                     return data
                 except Exception as backup_e:
                     if self._logger:
-                        self._logger.error("Backup state file also corrupt: %s", backup_e)
+                        self._logger.error(
+                            "Backup state file also corrupt: %s", backup_e
+                        )
 
             raise RuntimeError(
                 f"State file {self._state_file} is corrupt and no valid backup exists. "
@@ -274,7 +291,9 @@ class StateManager:
                 self._logger.debug("Saved state file to %s", self._state_file)
         except Exception as e:
             if self._logger:
-                self._logger.error("Failed to save state file %s: %s", self._state_file, e)
+                self._logger.error(
+                    "Failed to save state file %s: %s", self._state_file, e
+                )
             raise
 
     def get_repo_remote_url(self, owner: str, repo: str) -> str:
@@ -331,7 +350,9 @@ class StateManager:
         return {"timestamp": timestamp, "csv_file": csv_file}
 
     @with_lock
-    def update_repo(self, owner: str, repo: str, timestamp: datetime, csv_file: str) -> None:
+    def update_repo(
+        self, owner: str, repo: str, timestamp: datetime, csv_file: str
+    ) -> None:
         """Update state file with new last update date and csv file. Thread-safe."""
         state = self.load()
         repo_key = self.get_repo_remote_url(owner, repo)
@@ -379,7 +400,9 @@ class StateManager:
 
         self.save(state)
         if self._logger:
-            self._logger.warning("Marked PR #%d as failed for %s/%s", pr_number, owner, repo)
+            self._logger.warning(
+                "Marked PR #%d as failed for %s/%s", pr_number, owner, repo
+            )
 
     @with_lock
     def mark_pr_succeeded(self, owner: str, repo: str, pr_number: int) -> None:
@@ -395,7 +418,10 @@ class StateManager:
                 self.save(state)
                 if self._logger:
                     self._logger.info(
-                        "Removed PR #%d from failed list for %s/%s", pr_number, owner, repo
+                        "Removed PR #%d from failed list for %s/%s",
+                        pr_number,
+                        owner,
+                        repo,
                     )
 
     @with_lock
@@ -405,7 +431,8 @@ class StateManager:
         repo_key = self.get_repo_remote_url(owner, repo)
 
         if repo_key in state and isinstance(state[repo_key], dict):
-            return state[repo_key].get("failed_prs", [])
+            result: List[int] = state[repo_key].get("failed_prs", [])
+            return result
         return []
 
     @with_lock
@@ -442,7 +469,9 @@ class StateManager:
                         csv_file = entry.get("csv_file")
                     else:
                         if self._logger:
-                            self._logger.warning("Skipping %s: invalid state format", repo_url)
+                            self._logger.warning(
+                                "Skipping %s: invalid state format", repo_url
+                            )
                         continue
 
                     repos.append(
@@ -456,7 +485,9 @@ class StateManager:
                     )
             except Exception as e:
                 if self._logger:
-                    self._logger.warning("Failed to parse state entry for %s: %s", repo_url, e)
+                    self._logger.warning(
+                        "Failed to parse state entry for %s: %s", repo_url, e
+                    )
                 continue
 
         return repos
@@ -523,7 +554,9 @@ class CSVManager:
                     existing_data[pr_number] = row
 
             if self._logger:
-                self._logger.debug("Loaded %d existing PRs from %s", len(existing_data), csv_file)
+                self._logger.debug(
+                    "Loaded %d existing PRs from %s", len(existing_data), csv_file
+                )
             return existing_data
         except Exception as e:
             if self._logger:
@@ -556,11 +589,9 @@ class CSVManager:
         # Merge with existing data if requested
         if merge_mode and output_file:
             # Re-read inside lock to get latest data
-            if not os.path.exists(output_file):
-                existing_data = {}
-            else:
+            existing_data: Dict[Any, Any] = {}
+            if os.path.exists(output_file):
                 try:
-                    existing_data = {}
                     with open(output_file, "r", newline="", encoding="utf-8") as f:
                         reader = csv.DictReader(f)
                         for row in reader:
@@ -578,7 +609,9 @@ class CSVManager:
             all_metrics = list(existing_data.values())
             if self._logger:
                 self._logger.debug(
-                    "Merged data: %d total PRs (%d new/updated)", len(all_metrics), len(metrics)
+                    "Merged data: %d total PRs (%d new/updated)",
+                    len(all_metrics),
+                    len(metrics),
                 )
         else:
             all_metrics = metrics
@@ -587,7 +620,11 @@ class CSVManager:
             # Write to temp file first, then atomically rename
             output_path = Path(output_file)
             temp_fd, temp_path = tempfile.mkstemp(
-                dir=(output_path.parent if output_path.parent.exists() else tempfile.gettempdir()),
+                dir=(
+                    output_path.parent
+                    if output_path.parent.exists()
+                    else tempfile.gettempdir()
+                ),
                 prefix=".tmp_pr_metrics_",
                 suffix=".csv",
             )
@@ -601,12 +638,15 @@ class CSVManager:
                 # Atomic rename
                 os.rename(temp_path, output_file)
                 if self._logger:
-                    self._logger.debug("Wrote %d PRs to %s", len(all_metrics), output_file)
+                    self._logger.debug(
+                        "Wrote %d PRs to %s", len(all_metrics), output_file
+                    )
             except Exception as e:
                 # Keep temp file for debugging
                 if self._logger:
                     self._logger.error(
-                        "Failed to write CSV output. Temp file retained at: %s", temp_path
+                        "Failed to write CSV output. Temp file retained at: %s",
+                        temp_path,
                     )
                 raise e
         else:
@@ -628,6 +668,7 @@ def build_pr_json_data(pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, A
         Complete PR data dictionary ready for JSON serialization
     """
     pr_number = pr["number"]
+    assert github_client is not None
 
     # Fetch issue comments
     issue_comments = []
@@ -698,7 +739,9 @@ def build_pr_json_data(pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, A
     # Fetch timeline events (for ready_for_review detection)
     timeline_events = []
     try:
-        timeline_events = fetch_and_normalize_timeline_events(github_client, owner, repo, pr_number)
+        timeline_events = fetch_and_normalize_timeline_events(
+            github_client, owner, repo, pr_number
+        )
     except GitHubAPIError as e:
         logger.warning("Failed to fetch timeline events for PR #%d: %s", pr_number, e)
         fetch_errors.append(f"timeline_events: {e}")
@@ -726,7 +769,9 @@ def build_pr_json_data(pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, A
     }
 
 
-def write_pr_json(raw_data_dir: str, owner: str, repo: str, pr_data: Dict[str, Any]) -> None:
+def write_pr_json(
+    raw_data_dir: str, owner: str, repo: str, pr_data: Dict[str, Any]
+) -> None:
     """
     Write PR data to JSON file in provider-aware directory structure.
 
@@ -807,7 +852,9 @@ class PRFetcher:
         """
         return self.github_client.fetch_all_prs(owner, repo, start_date, end_date)
 
-    def fetch_pr_details(self, pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, Any]:
+    def fetch_pr_details(
+        self, pr: Dict[str, Any], owner: str, repo: str
+    ) -> Dict[str, Any]:
         """
         Fetch complete PR details including comments, reviews, and timeline.
 
@@ -842,13 +889,17 @@ class PRFetcher:
                     }
                 )
         except GitHubAPIError as e:
-            self.logger.warning("Failed to fetch issue comments for PR #%d: %s", pr_number, e)
+            self.logger.warning(
+                "Failed to fetch issue comments for PR #%d: %s", pr_number, e
+            )
             fetch_errors.append(f"issue_comments: {e}")
 
         # Fetch review comments
         review_comments = []
         try:
-            comments = self.github_client.fetch_review_comments(pr["review_comments_url"])
+            comments = self.github_client.fetch_review_comments(
+                pr["review_comments_url"]
+            )
             for comment in comments:
                 # Handle cases where user field is None (deleted/ghost users)
                 user = comment.get("user") or {}
@@ -865,7 +916,9 @@ class PRFetcher:
                     }
                 )
         except GitHubAPIError as e:
-            self.logger.warning("Failed to fetch review comments for PR #%d: %s", pr_number, e)
+            self.logger.warning(
+                "Failed to fetch review comments for PR #%d: %s", pr_number, e
+            )
             fetch_errors.append(f"review_comments: {e}")
 
         # Fetch reviews
@@ -956,7 +1009,9 @@ class PRFetcher:
         except Exception as e:
             self.logger.warning("Failed to write PR #%d JSON: %s", pr_number, e)
 
-    def fetch_and_cache_pr(self, pr: Dict[str, Any], owner: str, repo: str) -> Dict[str, Any]:
+    def fetch_and_cache_pr(
+        self, pr: Dict[str, Any], owner: str, repo: str
+    ) -> Dict[str, Any]:
         """
         Fetch PR details and cache to JSON file.
 
@@ -1011,7 +1066,9 @@ class MetricsGenerator:
         self.config = config
         self.logger = logger
 
-    def read_pr_json(self, owner: str, repo: str, pr_number: int) -> Optional[Dict[str, Any]]:
+    def read_pr_json(
+        self, owner: str, repo: str, pr_number: int
+    ) -> Optional[Dict[str, Any]]:
         """
         Read PR JSON from cache file.
 
@@ -1025,7 +1082,11 @@ class MetricsGenerator:
         """
         # Provider-aware path: raw_data_dir/github.com/owner/repo/pr_number.json
         json_file = (
-            Path(self.config.raw_data_dir) / "github.com" / owner / repo / f"{pr_number}.json"
+            Path(self.config.raw_data_dir)
+            / "github.com"
+            / owner
+            / repo
+            / f"{pr_number}.json"
         )
 
         if not json_file.exists():
@@ -1034,7 +1095,8 @@ class MetricsGenerator:
 
         try:
             with open(json_file, "r", encoding="utf-8") as f:
-                return json.load(f)
+                result: Optional[Dict[str, Any]] = json.load(f)
+                return result
         except Exception as e:
             self.logger.warning("Failed to read PR #%d JSON: %s", pr_number, e)
             return None
@@ -1076,7 +1138,9 @@ class MetricsGenerator:
 
         # Ready for review time
         try:
-            metrics["ready_for_review_at"] = get_ready_for_review_time(pr, owner, repo, token)
+            metrics["ready_for_review_at"] = get_ready_for_review_time(
+                pr, owner, repo, token
+            )
         except Exception as e:
             self.logger.debug("Error getting ready time for PR #%d: %s", pr_number, e)
             metrics["ready_for_review_at"] = pr["created_at"]
@@ -1087,9 +1151,13 @@ class MetricsGenerator:
 
         # Comment counts (including review bodies) - use data from pr_json_data
         try:
-            total_comments, non_ai_bot_comments, ai_bot_comments, non_ai_bot_names, ai_bot_names = (
-                count_comments_from_json(pr_json_data, self.config)
-            )
+            (
+                total_comments,
+                non_ai_bot_comments,
+                ai_bot_comments,
+                non_ai_bot_names,
+                ai_bot_names,
+            ) = count_comments_from_json(pr_json_data, self.config)
             metrics["total_comment_count"] = total_comments
             metrics["non_ai_bot_comment_count"] = non_ai_bot_comments
             metrics["ai_bot_comment_count"] = ai_bot_comments
@@ -1106,7 +1174,9 @@ class MetricsGenerator:
 
         # Review metrics - use reviews from pr_json_data
         try:
-            changes_requested, unique_requesters, approvals = get_review_metrics_from_json(reviews)
+            changes_requested, unique_requesters, approvals = (
+                get_review_metrics_from_json(reviews)
+            )
             metrics["changes_requested_count"] = changes_requested
             metrics["unique_change_requesters"] = unique_requesters
             metrics["approval_count"] = approvals
@@ -1146,7 +1216,9 @@ class MetricsGenerator:
             metrics["days_in_review"] = round(days_in_review, 2)
 
         except Exception as e:
-            self.logger.debug("Error calculating time metrics for PR #%d: %s", pr_number, e)
+            self.logger.debug(
+                "Error calculating time metrics for PR #%d: %s", pr_number, e
+            )
             metrics["days_open"] = ""
             metrics["days_in_review"] = ""
             errors.append(f"time_metrics: {e}")
@@ -1155,7 +1227,9 @@ class MetricsGenerator:
         metrics["lines_added"] = pr.get("additions", 0)
         metrics["lines_deleted"] = pr.get("deletions", 0)
         metrics["files_changed"] = pr.get("changed_files", 0)
-        metrics["total_line_changes"] = metrics["lines_added"] + metrics["lines_deleted"]
+        metrics["total_line_changes"] = (
+            metrics["lines_added"] + metrics["lines_deleted"]
+        )
 
         # Include fetch errors from PR JSON data if present
         if "fetch_errors" in pr_json_data:
@@ -1207,32 +1281,17 @@ class MetricsGenerator:
         return updates
 
 
-class LoggingManager:
-    """
-    Manages application logging with quota-aware prefixes.
-
-    Wraps standard logging to inject API quota status into all log messages.
-    """
+class QuotaPrefixFilter(logging.Filter):
+    """Logging filter that injects API quota status into log messages."""
 
     def __init__(self, quota_manager: QuotaManager):
-        """Initialize logging manager with reference to quota manager."""
+        super().__init__()
         self._quota_manager = quota_manager
 
-    def info(self, msg: str, *args, **kwargs) -> None:
-        """Log INFO with API quota prefix."""
-        logging.info(f"{self._quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
-
-    def warning(self, msg: str, *args, **kwargs) -> None:
-        """Log WARNING with API quota prefix."""
-        logging.warning(f"{self._quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
-
-    def error(self, msg: str, *args, **kwargs) -> None:
-        """Log ERROR with API quota prefix."""
-        logging.error(f"{self._quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
-
-    def debug(self, msg: str, *args, **kwargs) -> None:
-        """Log DEBUG with API quota prefix."""
-        logging.debug(f"{self._quota_manager.get_quota_prefix()} {msg}", *args, **kwargs)
+    def filter(self, record: logging.LogRecord) -> bool:
+        prefix = self._quota_manager.get_quota_prefix()
+        record.msg = f"{prefix} {record.msg}"
+        return True
 
 
 # ============================================================================
@@ -1240,9 +1299,9 @@ class LoggingManager:
 # ============================================================================
 
 quota_manager = QuotaManager()
-logger = LoggingManager(quota_manager)
+logger = logging.getLogger(__name__)
 state_manager = StateManager(logger=logger)
-github_client = None  # Initialized in main() with token, quota_manager, and logger
+github_client: Optional[GitHubClient] = None  # Initialized in main()
 csv_manager = CSVManager(logger=logger)
 
 
@@ -1302,7 +1361,8 @@ def get_ready_for_review_from_events(
     """
     ready_events = [e for e in events if e and e.get("event") == "ready_for_review"]
     if ready_events:
-        return ready_events[-1]["created_at"]
+        timestamp: str = ready_events[-1]["created_at"]
+        return timestamp
     return created_at
 
 
@@ -1313,13 +1373,21 @@ def get_ready_for_review_time(
     # If never a draft, use created_at
     if not pr.get("draft", False) and pr.get("created_at"):
         # Check events to see if it was ever a draft
-        try:
-            events = fetch_and_normalize_timeline_events(github_client, owner, repo, pr["number"])
-            return get_ready_for_review_from_events(events, pr["created_at"])
-        except GitHubAPIError as e:
-            logger.debug("Failed to fetch events for PR #%d: %s", pr["number"], e)
+        if github_client is not None:
+            try:
+                events = fetch_and_normalize_timeline_events(
+                    github_client, owner, repo, pr["number"]
+                )
+                return get_ready_for_review_from_events(events, pr["created_at"])
+            except GitHubAPIError as e:
+                logger.debug(
+                    "Failed to fetch events for PR #%d: %s",
+                    pr["number"],
+                    e,
+                )
 
-    return pr["created_at"]
+    result: str = pr["created_at"]
+    return result
 
 
 def count_comments_from_json(
@@ -1390,7 +1458,7 @@ def count_comments(
     repo: str,
     token: Optional[str],
     config: Config,
-    reviews: List[Dict[str, Any]] = None,
+    reviews: Optional[List[Dict[str, Any]]] = None,
 ) -> tuple[int, int, int, str, str]:
     """
     Count total comments, non-AI bot comments, and AI bot comments.
@@ -1402,6 +1470,7 @@ def count_comments(
     Args:
         reviews: Optional pre-fetched reviews list to avoid duplicate API calls
     """
+    assert github_client is not None
     total_comments = 0
     non_ai_bot_comments = 0
     ai_bot_comments = 0
@@ -1524,7 +1593,9 @@ def get_review_metrics_from_json(reviews: List[Dict[str, Any]]) -> tuple[int, in
     Returns (changes_requested_count, unique_change_requesters, approval_count).
     """
     # Count total change requests
-    changes_requested_count = sum(1 for r in reviews if r.get("state") == "CHANGES_REQUESTED")
+    changes_requested_count = sum(
+        1 for r in reviews if r.get("state") == "CHANGES_REQUESTED"
+    )
 
     # Count unique reviewers who requested changes
     change_requesters = {
@@ -1538,7 +1609,7 @@ def get_review_metrics_from_json(reviews: List[Dict[str, Any]]) -> tuple[int, in
     reviewer_states: Dict[str, str] = {}
     for review in reviews:
         if review.get("user") and review.get("state"):
-            user = review.get("user")
+            user: str = review["user"]
             reviewer_states[user] = review["state"]
 
     approval_count = sum(1 for state in reviewer_states.values() if state == "APPROVED")
@@ -1551,7 +1622,7 @@ def get_review_metrics(
     owner: str,
     repo: str,
     token: Optional[str],
-    reviews: List[Dict[str, Any]] = None,
+    reviews: Optional[List[Dict[str, Any]]] = None,
 ) -> tuple[int, int, int]:
     """
     Get review metrics: changes requested count, unique change requesters, approvals.
@@ -1562,14 +1633,21 @@ def get_review_metrics(
     """
     # Use pre-fetched reviews if provided, otherwise fetch
     if reviews is None:
+        assert github_client is not None
         try:
             reviews = github_client.fetch_reviews(owner, repo, pr["number"])
         except GitHubAPIError as e:
-            logger.debug("Failed to fetch reviews for PR #%d: %s", pr["number"], e)
-            return EXIT_CODE_SUCCESS, 0, 0
+            logger.debug(
+                "Failed to fetch reviews for PR #%d: %s",
+                pr["number"],
+                e,
+            )
+            return EXIT_SUCCESS, 0, 0
 
     # Count total change requests
-    changes_requested_count = sum(1 for r in reviews if r.get("state") == "CHANGES_REQUESTED")
+    changes_requested_count = sum(
+        1 for r in reviews if r.get("state") == "CHANGES_REQUESTED"
+    )
 
     # Count unique reviewers who requested changes
     change_requesters = {
@@ -1640,7 +1718,9 @@ def process_pr(
 
     # Ready for review time
     try:
-        metrics["ready_for_review_at"] = get_ready_for_review_time(pr, owner, repo, token)
+        metrics["ready_for_review_at"] = get_ready_for_review_time(
+            pr, owner, repo, token
+        )
     except Exception as e:
         logger.debug("Error getting ready time for PR #%d: %s", pr_number, e)
         metrics["ready_for_review_at"] = pr["created_at"]
@@ -1651,9 +1731,13 @@ def process_pr(
 
     # Comment counts (including review bodies) - use data from pr_json_data
     try:
-        total_comments, non_ai_bot_comments, ai_bot_comments, non_ai_bot_names, ai_bot_names = (
-            count_comments_from_json(pr_json_data, config)
-        )
+        (
+            total_comments,
+            non_ai_bot_comments,
+            ai_bot_comments,
+            non_ai_bot_names,
+            ai_bot_names,
+        ) = count_comments_from_json(pr_json_data, config)
         metrics["total_comment_count"] = total_comments
         metrics["non_ai_bot_comment_count"] = non_ai_bot_comments
         metrics["ai_bot_comment_count"] = ai_bot_comments
@@ -1670,7 +1754,9 @@ def process_pr(
 
     # Review metrics - use reviews from pr_json_data
     try:
-        changes_requested, unique_requesters, approvals = get_review_metrics_from_json(reviews)
+        changes_requested, unique_requesters, approvals = get_review_metrics_from_json(
+            reviews
+        )
         metrics["changes_requested_count"] = changes_requested
         metrics["unique_change_requesters"] = unique_requesters
         metrics["approval_count"] = approvals
@@ -1775,8 +1861,12 @@ Environment Variables:
         """,
     )
 
-    parser.add_argument("--owner", help="Repository owner (default: auto-detect from git)")
-    parser.add_argument("--repo", help="Repository name (default: auto-detect from git)")
+    parser.add_argument(
+        "--owner", help="Repository owner (default: auto-detect from git)"
+    )
+    parser.add_argument(
+        "--repo", help="Repository name (default: auto-detect from git)"
+    )
     parser.add_argument(
         "--pr",
         type=int,
@@ -1835,7 +1925,9 @@ Environment Variables:
         default=".gh-pr-metrics.yaml",
         help="Configuration file path (default: .gh-pr-metrics.yaml)",
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
+    )
 
     if ARGCOMPLETE_AVAILABLE:
         argcomplete.autocomplete(parser)
@@ -1844,7 +1936,9 @@ Environment Variables:
 
 
 def show_update_all_progress_summary(
-    tracked_repos: List[Dict[str, Any]], completed_repos: int, stopped_at: Optional[str] = None
+    tracked_repos: List[Dict[str, Any]],
+    completed_repos: int,
+    stopped_at: Optional[str] = None,
 ) -> None:
     """
     Show progress summary for update-all operation.
@@ -1905,7 +1999,9 @@ def fetch_and_process_pr(
         Metrics dict for CSV
     """
     pr_json_data = pr_fetcher.fetch_and_cache_pr(pr, owner, repo)
-    pr_metrics = metrics_generator.calculate_metrics(pr, pr_json_data, owner, repo, token)
+    pr_metrics = metrics_generator.calculate_metrics(
+        pr, pr_json_data, owner, repo, token
+    )
     return pr_metrics
 
 
@@ -1920,33 +2016,36 @@ def update_single_pr(
     """
     Update a single PR in an existing CSV file.
 
-    Returns EXIT_CODE_SUCCESS on success, EXIT_CODE_ERROR_QUOTA on error.
+    Returns EXIT_SUCCESS on success, EXIT_ERROR on error.
     """
+    assert github_client is not None
     logger.info("Fetching PR #%d from %s/%s", pr_number, owner, repo)
 
     try:
         pr = github_client.fetch_single_pr(owner, repo, pr_number)
     except GitHubAPIError as e:
         logger.error("Failed to fetch PR #%d: %s", pr_number, e)
-        return EXIT_CODE_ERROR_QUOTA
+        return EXIT_ERROR
 
     logger.info("Processing PR #%d", pr_number)
     try:
         # Create PRFetcher and MetricsGenerator instances
-        pr_fetcher = PRFetcher(github_client, quota_manager, config, logger, state_manager)
+        pr_fetcher = PRFetcher(
+            github_client, quota_manager, config, logger, state_manager
+        )
         metrics_generator = MetricsGenerator(config, logger)
         pr_metrics = fetch_and_process_pr(
             pr, owner, repo, token, config, pr_fetcher, metrics_generator
         )
     except Exception as e:
         logger.error("Failed to process PR #%d: %s", pr_number, e)
-        return EXIT_CODE_ERROR_QUOTA
+        return EXIT_ERROR
 
     # Read existing CSV
     if not Path(output_file).exists():
         logger.error("CSV file not found: %s", output_file)
         logger.error("Use regular mode first to create the CSV file")
-        return EXIT_CODE_ERROR_QUOTA
+        return EXIT_ERROR
 
     # Read existing CSV as dict keyed by PR number
     logger.info("Reading existing CSV: %s", output_file)
@@ -1966,7 +2065,7 @@ def update_single_pr(
     csv_manager.write_csv(all_metrics, output_file, merge_mode=False)
 
     logger.info("Successfully updated PR #%d", pr_number)
-    return EXIT_CODE_SUCCESS
+    return EXIT_SUCCESS
 
 
 def process_repository(
@@ -1991,10 +2090,16 @@ def process_repository(
     chunks_completed: Number of chunks successfully processed
     total_chunks_fetched: Total chunks fetched (may be more than completed if stopped mid-chunk)
     """
+    assert github_client is not None
     repo_ctx = f"{owner}/{repo}"
 
     logger.info("[%s] Starting processing", repo_ctx)
-    logger.info("[%s] Date range: %s to %s", repo_ctx, start_date.isoformat(), end_date.isoformat())
+    logger.info(
+        "[%s] Date range: %s to %s",
+        repo_ctx,
+        start_date.isoformat(),
+        end_date.isoformat(),
+    )
 
     # Check for previously failed PRs that need retry
     failed_prs = state_manager.get_failed_prs(owner, repo)
@@ -2025,7 +2130,7 @@ def process_repository(
             limit,
         )
         # Note: per-repo wait not implemented, only at update-all level
-        return EXIT_CODE_ERROR_QUOTA, 0, 0
+        return EXIT_ERROR, 0, 0
 
     logger.info(
         "[%s] Quota check: can process up to ~%d PRs before hitting reserve",
@@ -2049,9 +2154,13 @@ def process_repository(
                 try:
                     pr = github_client.fetch_single_pr(owner, repo, pr_number)
                     failed_pr_objects.append(pr)
-                    logger.info("[%s] Added failed PR #%d to retry list", repo_ctx, pr_number)
+                    logger.info(
+                        "[%s] Added failed PR #%d to retry list", repo_ctx, pr_number
+                    )
                 except GitHubAPIError as e:
-                    logger.error("[%s] Cannot fetch failed PR #%d: %s", repo_ctx, pr_number, e)
+                    logger.error(
+                        "[%s] Cannot fetch failed PR #%d: %s", repo_ctx, pr_number, e
+                    )
 
             # Prepend failed PRs to all_prs (processed first)
             # Remove duplicates if failed PR is also in date range
@@ -2061,13 +2170,17 @@ def process_repository(
             ]
             all_prs = failed_pr_objects + all_prs
             logger.info(
-                "[%s] Prioritizing %d failed PR(s) for retry", repo_ctx, len(failed_pr_objects)
+                "[%s] Prioritizing %d failed PR(s) for retry",
+                repo_ctx,
+                len(failed_pr_objects),
             )
 
         if not all_prs:
-            logger.info("[%s] No pull requests found in the specified date range", repo_ctx)
+            logger.info(
+                "[%s] No pull requests found in the specified date range", repo_ctx
+            )
             state_manager.update_repo(owner, repo, end_date, output_file)
-            return EXIT_CODE_SUCCESS, 1, 0
+            return EXIT_SUCCESS, 1, 0
 
         logger.info("[%s] Collected %d PRs total", repo_ctx, len(all_prs))
         # Estimate chunks fetched (for return value compatibility)
@@ -2120,7 +2233,7 @@ def process_repository(
                         "after rate limit resets.",
                         repo_ctx,
                     )
-                    return EXIT_CODE_ERROR_QUOTA, chunks_completed, total_chunks_fetched
+                    return EXIT_ERROR, chunks_completed, total_chunks_fetched
 
             # Process this chunk of PRs
             metrics = []
@@ -2158,12 +2271,16 @@ def process_repository(
                         pr_metrics = future.result()
 
                         # Write to CSV immediately (thread-safe)
-                        csv_manager.write_csv([pr_metrics], output_file, merge_mode=True)
+                        csv_manager.write_csv(
+                            [pr_metrics], output_file, merge_mode=True
+                        )
                         metrics.append(pr_metrics)
 
                         updated_at = pr.get("updated_at")
                         updated_str = (
-                            format_timestamp_local(updated_at) if updated_at else "unknown"
+                            format_timestamp_local(updated_at)
+                            if updated_at
+                            else "unknown"
                         )
                         logger.info(
                             "[%s] %s: Completed PR %d/%d: #%d (updated: %s)",
@@ -2187,7 +2304,9 @@ def process_repository(
             # Find the timestamp to set in the state file
             if prs_chunk:
                 # Default to the updated_at of the last PR in this chunk
-                last_processed_timestamp = date_parser.parse(prs_chunk[-1]["updated_at"])
+                last_processed_timestamp = date_parser.parse(
+                    prs_chunk[-1]["updated_at"]
+                )
 
             # Check if this is the last chunk and we had sufficient quota
             is_last_chunk = chunk_end >= len(all_prs)
@@ -2196,7 +2315,9 @@ def process_repository(
                 last_processed_timestamp = end_date
 
             # Update state file
-            state_manager.update_repo(owner, repo, last_processed_timestamp, output_file)
+            state_manager.update_repo(
+                owner, repo, last_processed_timestamp, output_file
+            )
             chunks_completed += 1
             logger.info(
                 "[%s] %s: Processed %d PRs, updated state to %s",
@@ -2215,26 +2336,29 @@ def process_repository(
                     chunks_completed,
                     total_chunks_fetched,
                 )
-                return EXIT_CODE_ERROR_QUOTA, chunks_completed, total_chunks_fetched
+                return EXIT_ERROR, chunks_completed, total_chunks_fetched
 
     except GitHubAPIError as e:
         error_msg = str(e)
         logger.error("[%s] GitHub API error: %s", repo_ctx, error_msg)
 
-        # Return EXIT_CODE_ERROR_REPO_ACCESS for repo access errors (not found, permissions)
+        # Return EXIT_ERROR_REPO_ACCESS for repo access errors (not found, permissions)
         # These should not stop update-all processing
-        if "not found" in error_msg.lower() or "insufficient permissions" in error_msg.lower():
-            return EXIT_CODE_ERROR_REPO_ACCESS, chunks_completed, total_chunks_fetched
+        if (
+            "not found" in error_msg.lower()
+            or "insufficient permissions" in error_msg.lower()
+        ):
+            return EXIT_ERROR_REPO_ACCESS, chunks_completed, total_chunks_fetched
 
         # Other API errors (rate limit, network) should stop processing
-        return EXIT_CODE_ERROR_QUOTA, chunks_completed, total_chunks_fetched
+        return EXIT_ERROR, chunks_completed, total_chunks_fetched
     except Exception as e:
         logger.error("[%s] Unexpected error: %s", repo_ctx, e, exc_info=True)
-        return EXIT_CODE_ERROR_QUOTA, chunks_completed, total_chunks_fetched
+        return EXIT_ERROR, chunks_completed, total_chunks_fetched
 
     # Successfully completed all chunks
     logger.info("[%s] Successfully completed all %d chunks", repo_ctx, chunks_completed)
-    return EXIT_CODE_SUCCESS, chunks_completed, total_chunks_fetched
+    return EXIT_SUCCESS, chunks_completed, total_chunks_fetched
 
 
 def reprocess_repository(
@@ -2253,7 +2377,7 @@ def reprocess_repository(
 
     No GitHub API calls are made.
 
-    Returns EXIT_CODE_SUCCESS on success, EXIT_CODE_ERROR_QUOTA on error.
+    Returns EXIT_SUCCESS on success, EXIT_ERROR on error.
     """
     repo_ctx = f"{owner}/{repo}"
     raw_dir = Path(config.raw_data_dir) / "github.com" / owner / repo
@@ -2262,11 +2386,11 @@ def reprocess_repository(
     existing_data = csv_manager.read_csv(output_file)
     if not existing_data:
         logger.warning("[%s] No existing CSV data found at %s", repo_ctx, output_file)
-        return EXIT_CODE_SUCCESS
+        return EXIT_SUCCESS
 
     if not raw_dir.exists():
         logger.warning("[%s] No cached JSON data found at %s", repo_ctx, raw_dir)
-        return EXIT_CODE_SUCCESS
+        return EXIT_SUCCESS
 
     logger.info(
         "[%s] Reprocessing %d PRs from CSV using cached JSON",
@@ -2288,7 +2412,8 @@ def reprocess_repository(
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_pr = {
-            executor.submit(load_and_recalculate, pr_num): pr_num for pr_num in existing_data
+            executor.submit(load_and_recalculate, pr_num): pr_num
+            for pr_num in existing_data
         }
         for future in as_completed(future_to_pr):
             pr_num = future_to_pr[future]
@@ -2312,7 +2437,7 @@ def reprocess_repository(
 
     if updated_count == 0:
         logger.warning("[%s] No PRs updated", repo_ctx)
-        return EXIT_CODE_SUCCESS
+        return EXIT_SUCCESS
 
     # Write updated CSV
     all_metrics = list(existing_data.values())
@@ -2325,7 +2450,7 @@ def reprocess_repository(
         output_file,
     )
 
-    return EXIT_CODE_SUCCESS
+    return EXIT_SUCCESS
 
 
 def main() -> int:
@@ -2338,7 +2463,7 @@ def main() -> int:
     except ValueError as e:
         print(f"Error loading configuration: {e}", file=sys.stderr)
         print(f"Configuration file: {args.config}", file=sys.stderr)
-        return EXIT_CODE_ERROR_QUOTA
+        return EXIT_ERROR
 
     setup_logging(args.debug, config.log_file)
 
@@ -2351,97 +2476,110 @@ def main() -> int:
     failed_count = state_manager.get_all_failed_prs_count()
     if failed_count > 0:
         logger.warning(
-            "Found %d previously failed PR(s) tracked across all repositories", failed_count
+            "Found %d previously failed PR(s) tracked across all repositories",
+            failed_count,
         )
         logger.warning("These PRs will be retried automatically during processing")
 
     # Validate argument combinations
     if args.init and not args.owner:
         logger.error("--init requires --owner")
-        return EXIT_CODE_ERROR_QUOTA
+        return EXIT_ERROR
 
     if args.init and not (args.output or config.output_pattern):
         logger.error(
             "--init requires --output or output_pattern in config "
             "(supports patterns like 'data/{owner}-{repo}.csv')"
         )
-        return EXIT_CODE_ERROR_QUOTA
+        return EXIT_ERROR
 
     if args.init and not args.start:
         logger.error("--init requires --start to specify the starting date")
-        return EXIT_CODE_ERROR_QUOTA
+        return EXIT_ERROR
 
     if args.init and args.end:
         logger.error("--init cannot be used with --end (uses current time)")
-        return EXIT_CODE_ERROR_QUOTA
+        return EXIT_ERROR
 
     if args.init and (args.update or args.update_all):
         logger.error("--init cannot be used with --update or --update-all")
-        return EXIT_CODE_ERROR_QUOTA
+        return EXIT_ERROR
 
     if args.update and args.output:
-        logger.error("--update and --output cannot be used together (update uses stored CSV path)")
-        return EXIT_CODE_ERROR_QUOTA
+        logger.error(
+            "--update and --output cannot be used together (update uses stored CSV path)"
+        )
+        return EXIT_ERROR
 
     if args.update and (args.start or args.end):
         logger.error(
             "--update cannot be used with --start or --end (uses last update date from state)"
         )
-        return EXIT_CODE_ERROR_QUOTA
+        return EXIT_ERROR
 
     if args.update_all and args.output:
-        logger.error("--update-all and --output cannot be used together (uses stored CSV paths)")
-        return EXIT_CODE_ERROR_QUOTA
+        logger.error(
+            "--update-all and --output cannot be used together (uses stored CSV paths)"
+        )
+        return EXIT_ERROR
 
     if args.update_all and (args.start or args.end):
         logger.error(
             "--update-all cannot be used with --start or --end (uses last update dates from state)"
         )
-        return EXIT_CODE_ERROR_QUOTA
+        return EXIT_ERROR
 
     if args.update_all and (args.owner or args.repo):
         logger.error("--update-all cannot be used with --owner or --repo")
-        return EXIT_CODE_ERROR_QUOTA
+        return EXIT_ERROR
 
     if args.update and args.update_all:
         logger.error("--update and --update-all cannot be used together")
-        return EXIT_CODE_ERROR_QUOTA
+        return EXIT_ERROR
 
     if args.wait and not (args.update or args.update_all):
         logger.error("--wait can only be used with --update or --update-all")
-        return EXIT_CODE_ERROR_QUOTA
+        return EXIT_ERROR
 
     if args.pr and (args.init or args.update or args.update_all or args.reprocess):
-        logger.error("--pr cannot be used with --init, --update, --update-all, or --reprocess")
-        return EXIT_CODE_ERROR_QUOTA
+        logger.error(
+            "--pr cannot be used with --init, --update, --update-all, or --reprocess"
+        )
+        return EXIT_ERROR
 
     if args.pr and not args.output and not config.output_pattern:
-        logger.error("--pr requires --output or config output_pattern to specify the CSV file")
-        return EXIT_CODE_ERROR_QUOTA
+        logger.error(
+            "--pr requires --output or config output_pattern to specify the CSV file"
+        )
+        return EXIT_ERROR
 
     if args.reprocess and (args.init or args.update or args.update_all):
-        logger.error("--reprocess cannot be used with --init, --update, or --update-all")
-        return EXIT_CODE_ERROR_QUOTA
+        logger.error(
+            "--reprocess cannot be used with --init, --update, or --update-all"
+        )
+        return EXIT_ERROR
 
     if args.reprocess and (args.start or args.end):
-        logger.error("--reprocess cannot be used with --start or --end (uses cached data)")
-        return EXIT_CODE_ERROR_QUOTA
+        logger.error(
+            "--reprocess cannot be used with --start or --end (uses cached data)"
+        )
+        return EXIT_ERROR
 
     if args.reprocess and args.output:
         logger.error(
             "--reprocess cannot be used with --output (uses stored CSV paths from state file)"
         )
-        return EXIT_CODE_ERROR_QUOTA
+        return EXIT_ERROR
 
     if args.reprocess and args.wait:
         logger.error("--reprocess cannot be used with --wait (no API calls needed)")
-        return EXIT_CODE_ERROR_QUOTA
+        return EXIT_ERROR
 
     # Regular mode requires --start (update modes use state file timestamps)
     has_mode = args.init or args.update or args.update_all or args.pr or args.reprocess
     if not has_mode and not args.start:
         logger.error("--start is required to specify the starting date")
-        return EXIT_CODE_ERROR_QUOTA
+        return EXIT_ERROR
 
     # Handle reprocess mode (no API calls needed)
     if args.reprocess:
@@ -2452,14 +2590,16 @@ def main() -> int:
             owner = args.owner
             repo = args.repo
             if not owner or not repo:
-                logger.error("--reprocess with --owner requires --repo (and vice versa)")
-                return EXIT_CODE_ERROR_QUOTA
+                logger.error(
+                    "--reprocess with --owner requires --repo (and vice versa)"
+                )
+                return EXIT_ERROR
 
             try:
                 repo_state = state_manager.get_repo_state(owner, repo)
             except ValueError as e:
                 logger.error("State file validation failed: %s", e)
-                return EXIT_CODE_ERROR_QUOTA
+                return EXIT_ERROR
 
             if not repo_state:
                 logger.error(
@@ -2468,7 +2608,7 @@ def main() -> int:
                     owner,
                     repo,
                 )
-                return EXIT_CODE_ERROR_QUOTA
+                return EXIT_ERROR
 
             csv_file = repo_state["csv_file"]
             return reprocess_repository(owner, repo, csv_file, config, workers)
@@ -2478,16 +2618,18 @@ def main() -> int:
                 tracked_repos = state_manager.get_all_tracked_repos()
             except Exception as e:
                 logger.error("Failed to load state file: %s", e)
-                return EXIT_CODE_ERROR_QUOTA
+                return EXIT_ERROR
 
             if not tracked_repos:
                 logger.error(
                     "No tracked repositories found in state file. "
                     "Run --init first to track repositories."
                 )
-                return EXIT_CODE_ERROR_QUOTA
+                return EXIT_ERROR
 
-            logger.info("Reprocessing %d tracked repositories from cache", len(tracked_repos))
+            logger.info(
+                "Reprocessing %d tracked repositories from cache", len(tracked_repos)
+            )
 
             completed_repos = 0
             for repo_info in tracked_repos:
@@ -2496,21 +2638,25 @@ def main() -> int:
                 csv_file = repo_info["csv_file"]
 
                 if not csv_file:
-                    logger.warning("Skipping %s/%s: no CSV file stored in state", owner, repo)
+                    logger.warning(
+                        "Skipping %s/%s: no CSV file stored in state", owner, repo
+                    )
                     continue
 
                 logger.info("=" * 80)
                 exit_code = reprocess_repository(owner, repo, csv_file, config, workers)
-                if exit_code == EXIT_CODE_SUCCESS:
+                if exit_code == EXIT_SUCCESS:
                     completed_repos += 1
                 else:
                     logger.error("Failed to reprocess %s/%s", owner, repo)
 
             logger.info("=" * 80)
             logger.info(
-                "Reprocessing complete: %d/%d repositories", completed_repos, len(tracked_repos)
+                "Reprocessing complete: %d/%d repositories",
+                completed_repos,
+                len(tracked_repos),
             )
-            return EXIT_CODE_SUCCESS
+            return EXIT_SUCCESS
 
     # Get GitHub token and initialize client
     token = get_github_token()
@@ -2570,11 +2716,11 @@ def main() -> int:
                 logger.info("Found %d repositories for %s", len(repos_to_init), owner)
             except GitHubAPIError as e:
                 logger.error("Failed to list repositories for %s: %s", owner, e)
-                return EXIT_CODE_ERROR_QUOTA
+                return EXIT_ERROR
 
         if not repos_to_init:
             logger.error("No repositories found for owner: %s", owner)
-            return EXIT_CODE_ERROR_QUOTA
+            return EXIT_ERROR
 
         # Parse start date (required for --init)
         start_date = parse_timestamp(args.start)
@@ -2614,7 +2760,7 @@ def main() -> int:
                 continue
 
             # Expand output pattern
-            output_pattern = args.output or config.output_pattern
+            output_pattern: str = args.output or config.output_pattern or ""
             csv_file = expand_output_pattern(output_pattern, owner, repo)
 
             # Create parent directory if needed
@@ -2638,7 +2784,7 @@ def main() -> int:
         logger.info("Initialization complete:")
         logger.info("  Initialized: %d", successful)
         logger.info("  Skipped (already tracked): %d", skipped)
-        return EXIT_CODE_SUCCESS
+        return EXIT_SUCCESS
 
     # Handle update-all mode
     if args.update_all:
@@ -2649,14 +2795,14 @@ def main() -> int:
                 tracked_repos = state_manager.get_all_tracked_repos()
             except Exception as e:
                 logger.error("Failed to load state file: %s", e)
-                return EXIT_CODE_ERROR_QUOTA
+                return EXIT_ERROR
 
             if not tracked_repos:
                 logger.error(
                     "No tracked repositories found in state file. "
                     "Run without --update-all first to track repositories."
                 )
-                return EXIT_CODE_ERROR_QUOTA
+                return EXIT_ERROR
 
             # Sort repositories by timestamp (oldest first)
             tracked_repos.sort(key=lambda r: r["timestamp"])
@@ -2678,20 +2824,24 @@ def main() -> int:
                     logger.info("Will wait for quota reset, then start processing")
 
                     if not quota_manager.wait_for_reset(logger):
-                        return EXIT_CODE_ERROR_QUOTA
+                        return EXIT_ERROR
                     # After waiting, refresh quota and reload state
                     quota_manager.initialize(token)
                     max_prs = quota_manager.calculate_max_prs()
                     if max_prs == 0:
                         logger.error("Quota still exhausted after reset, aborting")
-                        return EXIT_CODE_ERROR_QUOTA
+                        return EXIT_ERROR
                     logger.info("Resuming update-all with refreshed quota")
                     continue  # Restart loop to reload state
                 else:
-                    logger.error("Use --wait to automatically wait for reset, or try again later")
-                    return EXIT_CODE_ERROR_QUOTA
+                    logger.error(
+                        "Use --wait to automatically wait for reset, or try again later"
+                    )
+                    return EXIT_ERROR
 
-            logger.info("Quota check: can process up to ~%d PRs total across all repos", max_prs)
+            logger.info(
+                "Quota check: can process up to ~%d PRs total across all repos", max_prs
+            )
 
             completed_repos = 0
             failed_repo = None
@@ -2703,7 +2853,9 @@ def main() -> int:
                 last_update = repo_info["timestamp"]
 
                 if not csv_file:
-                    logger.warning("Skipping %s/%s: no CSV file stored in state", owner, repo)
+                    logger.warning(
+                        "Skipping %s/%s: no CSV file stored in state", owner, repo
+                    )
                     continue
 
                 logger.info("=" * 80)
@@ -2723,9 +2875,9 @@ def main() -> int:
                     merge_mode=True,
                 )
 
-                if exit_code == EXIT_CODE_SUCCESS:
+                if exit_code == EXIT_SUCCESS:
                     completed_repos += 1
-                elif exit_code == EXIT_CODE_ERROR_REPO_ACCESS:
+                elif exit_code == EXIT_ERROR_REPO_ACCESS:
                     # Repo access error (not found, permissions) - skip and continue
                     logger.warning(
                         "Skipping %s/%s: repository not accessible "
@@ -2747,20 +2899,24 @@ def main() -> int:
             # Check if we completed all repos
             if failed_repo is None:
                 logger.info("=" * 80)
-                logger.info("Successfully processed all %d repositories", completed_repos)
-                return EXIT_CODE_SUCCESS
+                logger.info(
+                    "Successfully processed all %d repositories", completed_repos
+                )
+                return EXIT_SUCCESS
 
             # Failed at least one repo
             if args.wait:
                 # Re-read tracked repos to get updated timestamps from processing
                 tracked_repos = state_manager.get_all_tracked_repos()
                 # Show progress summary before waiting
-                show_update_all_progress_summary(tracked_repos, completed_repos, failed_repo)
+                show_update_all_progress_summary(
+                    tracked_repos, completed_repos, failed_repo
+                )
                 logger.info("Will wait for quota reset, then restart from beginning")
 
                 if not quota_manager.wait_for_reset(logger):
                     logger.error("Failed to wait for quota reset, aborting")
-                    return EXIT_CODE_ERROR_QUOTA
+                    return EXIT_ERROR
                 # Refresh quota and restart from beginning
                 quota_manager.initialize(token)
                 logger.info("Quota refreshed, restarting update-all from beginning")
@@ -2772,7 +2928,7 @@ def main() -> int:
                     completed_repos,
                     failed_repo,
                 )
-                return EXIT_CODE_ERROR_QUOTA
+                return EXIT_ERROR
 
     # Get repository info
     owner = args.owner
@@ -2788,19 +2944,19 @@ def main() -> int:
             "Could not determine repository. "
             "Use --owner and --repo or run from a git repository."
         )
-        return EXIT_CODE_ERROR_QUOTA
+        return EXIT_ERROR
 
     # Handle update mode for specific repo
     if args.update:
         if not owner or not repo:
             logger.error("--update requires --owner and --repo to be specified")
-            return EXIT_CODE_ERROR_QUOTA
+            return EXIT_ERROR
 
         try:
             repo_state = state_manager.get_repo_state(owner, repo)
         except ValueError as e:
             logger.error("State file validation failed: %s", e)
-            return EXIT_CODE_ERROR_QUOTA
+            return EXIT_ERROR
 
         if not repo_state:
             logger.error(
@@ -2809,7 +2965,7 @@ def main() -> int:
                 owner,
                 repo,
             )
-            return EXIT_CODE_ERROR_QUOTA
+            return EXIT_ERROR
 
         csv_file = repo_state["csv_file"]
 
@@ -2831,7 +2987,7 @@ def main() -> int:
             )
 
             # If successful or error other than quota exhaustion, return
-            if exit_code != EXIT_CODE_ERROR_QUOTA:
+            if exit_code != EXIT_ERROR:
                 return exit_code
 
             # Quota exhausted - check if we should wait and retry
@@ -2839,7 +2995,7 @@ def main() -> int:
                 logger.info("Will wait for quota reset, then retry")
                 if not quota_manager.wait_for_reset(logger):
                     logger.error("Failed to wait for quota reset, aborting")
-                    return EXIT_CODE_ERROR_QUOTA
+                    return EXIT_ERROR
                 # Refresh quota and retry
                 quota_manager.initialize(token)
                 logger.info("Quota refreshed, retrying update")
@@ -2848,7 +3004,7 @@ def main() -> int:
                     repo_state = state_manager.get_repo_state(owner, repo)
                 except ValueError as e:
                     logger.error("State file validation failed: %s", e)
-                    return EXIT_CODE_ERROR_QUOTA
+                    return EXIT_ERROR
                 continue  # Retry
             else:
                 logger.error(
@@ -2857,22 +3013,23 @@ def main() -> int:
                     owner,
                     repo,
                 )
-                return EXIT_CODE_ERROR_QUOTA
+                return EXIT_ERROR
 
     # Handle single PR update mode
+    output_file: Optional[str]
     if args.pr:
-        output_pattern = args.output or config.output_pattern
-        output_file = expand_output_pattern(output_pattern, owner, repo)
+        pr_pattern: str = args.output or config.output_pattern or ""
+        output_file = expand_output_pattern(pr_pattern, owner, repo)
         exit_code = update_single_pr(owner, repo, args.pr, output_file, token, config)
         return exit_code
 
     # Regular mode (non-update)
-    output_pattern = args.output or config.output_pattern
-    if not output_pattern:
+    reg_pattern = args.output or config.output_pattern
+    if not reg_pattern:
         output_file = None  # stdout
     else:
         # Expand output pattern with owner/repo placeholders
-        output_file = expand_output_pattern(output_pattern, owner, repo)
+        output_file = expand_output_pattern(reg_pattern, owner, repo)
 
     # Get time range from args (--start is required, validated above)
     end_date = parse_timestamp(args.end) if args.end else datetime.now(timezone.utc)
@@ -2880,7 +3037,7 @@ def main() -> int:
 
     if start_date >= end_date:
         logger.error("Start date must be before end date")
-        return EXIT_CODE_ERROR_QUOTA
+        return EXIT_ERROR
 
     # Only store state if output_file is specified (not stdout)
     if output_file:
@@ -2897,7 +3054,9 @@ def main() -> int:
     else:
         # stdout mode - fetch all PRs then process (no state tracking)
         # Create PRFetcher and MetricsGenerator instances
-        pr_fetcher = PRFetcher(github_client, quota_manager, config, logger, state_manager)
+        pr_fetcher = PRFetcher(
+            github_client, quota_manager, config, logger, state_manager
+        )
         metrics_generator = MetricsGenerator(config, logger)
 
         try:
@@ -2905,7 +3064,7 @@ def main() -> int:
 
             if not all_prs:
                 logger.warning("No pull requests found in the specified date range")
-                return EXIT_CODE_SUCCESS
+                return EXIT_SUCCESS
 
             metrics = []
             total_prs = len(all_prs)
@@ -2938,7 +3097,9 @@ def main() -> int:
 
                         updated_at = pr.get("updated_at")
                         updated_str = (
-                            format_timestamp_local(updated_at) if updated_at else "unknown"
+                            format_timestamp_local(updated_at)
+                            if updated_at
+                            else "unknown"
                         )
                         logger.info(
                             "Completed PR %d/%d: #%d (updated: %s)",
@@ -2952,14 +3113,14 @@ def main() -> int:
 
             csv_manager.write_csv(metrics, None, merge_mode=False)
             logger.info("Successfully processed %d pull requests", len(metrics))
-            return EXIT_CODE_SUCCESS
+            return EXIT_SUCCESS
 
         except GitHubAPIError as e:
             logger.error("GitHub API error: %s", e)
-            return EXIT_CODE_ERROR_QUOTA
+            return EXIT_ERROR
         except Exception as e:
             logger.error("Unexpected error: %s", e, exc_info=args.debug)
-            return EXIT_CODE_ERROR_QUOTA
+            return EXIT_ERROR
 
 
 # ============================================================================
@@ -2971,31 +3132,38 @@ def setup_logging(debug: bool = False, log_file: str = "gh-pr-metrics.log") -> N
     """Configure logging based on debug flag with file and stderr output."""
     level = logging.DEBUG if debug else logging.INFO
 
-    # Create formatters
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-    # Setup root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
 
-    # Remove any existing handlers
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
 
-    # Add stderr handler
+    for f in root_logger.filters[:]:
+        root_logger.removeFilter(f)
+
+    root_logger.addFilter(QuotaPrefixFilter(quota_manager))
+
     stderr_handler = logging.StreamHandler(sys.stderr)
     stderr_handler.setLevel(level)
     stderr_handler.setFormatter(formatter)
     root_logger.addHandler(stderr_handler)
 
-    # Add file handler
+    log_path = Path(log_file).expanduser().resolve()
     try:
-        file_handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_path,
+            mode="a",
+            maxBytes=2 * 1024 * 1024,
+            backupCount=1,
+            encoding="utf-8",
+        )
         file_handler.setLevel(level)
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
     except Exception as e:
-        logging.warning(f"Could not create log file {log_file}: {e}")
+        logging.warning("Could not create log file %s: %s", log_file, e)
 
 
 def estimate_api_calls_for_prs(pr_count: int) -> int:
@@ -3063,7 +3231,7 @@ def parse_timestamp(timestamp_str: str) -> datetime:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
-    except (ValueError, OverflowError):
+    except ValueError, OverflowError:
         try:
             # Try ISO 8601 / RFC 3339
             dt = date_parser.parse(timestamp_str)

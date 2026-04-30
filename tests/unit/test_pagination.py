@@ -12,7 +12,10 @@ class TestPagination:
         # Mock first page with Link header
         requests_mock.get(
             "https://api.github.com/repos/test/test/issues/1/comments?per_page=100",
-            json=[{"id": i, "user": {"login": f"user{i}", "type": "User"}} for i in range(100)],
+            json=[
+                {"id": i, "user": {"login": f"user{i}", "type": "User"}}
+                for i in range(100)
+            ],
             headers={
                 "Link": (
                     '<https://api.github.com/repos/test/test/issues/1/comments?page=2>; rel="next"'
@@ -27,7 +30,8 @@ class TestPagination:
         requests_mock.get(
             "https://api.github.com/repos/test/test/issues/1/comments?page=2",
             json=[
-                {"id": i, "user": {"login": f"user{i}", "type": "User"}} for i in range(100, 115)
+                {"id": i, "user": {"login": f"user{i}", "type": "User"}}
+                for i in range(100, 115)
             ],
             headers={
                 "X-RateLimit-Remaining": "4998",
@@ -53,7 +57,10 @@ class TestPagination:
         # Mock first page
         requests_mock.get(
             "https://api.github.com/repos/test/test/pulls/1/comments?per_page=100",
-            json=[{"id": i, "user": {"login": f"reviewer{i}", "type": "User"}} for i in range(100)],
+            json=[
+                {"id": i, "user": {"login": f"reviewer{i}", "type": "User"}}
+                for i in range(100)
+            ],
             headers={
                 "Link": (
                     '<https://api.github.com/repos/test/test/pulls/1/comments?page=2>; rel="next"'
@@ -112,7 +119,11 @@ class TestPagination:
         requests_mock.get(
             "https://api.github.com/repos/test/test/pulls/1/reviews?page=2",
             json=[
-                {"id": i, "user": {"login": f"reviewer{i}"}, "state": "CHANGES_REQUESTED"}
+                {
+                    "id": i,
+                    "user": {"login": f"reviewer{i}"},
+                    "state": "CHANGES_REQUESTED",
+                }
                 for i in range(100, 125)
             ],
             headers={
@@ -171,7 +182,10 @@ class TestPagination:
         """Test fetching comments when only one page exists."""
         requests_mock.get(
             "https://api.github.com/repos/test/test/issues/1/comments?per_page=100",
-            json=[{"id": i, "user": {"login": f"user{i}", "type": "User"}} for i in range(10)],
+            json=[
+                {"id": i, "user": {"login": f"user{i}", "type": "User"}}
+                for i in range(10)
+            ],
             headers={
                 "X-RateLimit-Remaining": "4999",
                 "X-RateLimit-Limit": "5000",

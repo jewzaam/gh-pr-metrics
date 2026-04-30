@@ -89,7 +89,9 @@ class QuotaManager:
             headers["Authorization"] = f"Bearer {token}"
 
         try:
-            response = requests.get(f"{GITHUB_API_BASE}/rate_limit", headers=headers, timeout=10)
+            response = requests.get(
+                f"{GITHUB_API_BASE}/rate_limit", headers=headers, timeout=10
+            )
             response.raise_for_status()
             data = response.json()
 
@@ -195,7 +197,9 @@ class QuotaManager:
             rate_info = self.initialize(token)
             if not rate_info:
                 # Failed to get quota - cannot proceed safely
-                log.error("[%s] Failed to fetch quota, cannot verify rate limit", repo_ctx)
+                log.error(
+                    "[%s] Failed to fetch quota, cannot verify rate limit", repo_ctx
+                )
                 return False, 0
             remaining = rate_info["remaining"]
             limit = rate_info["limit"]
@@ -208,7 +212,9 @@ class QuotaManager:
         effective_buffer = max(API_SAFETY_BUFFER, reserve)
 
         # Show estimated calls for this operation
-        log.info("[%s] %sEstimated API calls: ~%d", repo_ctx, chunk_info, estimated_calls)
+        log.info(
+            "[%s] %sEstimated API calls: ~%d", repo_ctx, chunk_info, estimated_calls
+        )
 
         if remaining <= (estimated_calls + effective_buffer):
             log.error(
@@ -222,7 +228,10 @@ class QuotaManager:
                 remaining,
             )
             log.warning(
-                "[%s] %sCurrent quota allows processing ~%d PRs max", repo_ctx, chunk_info, max_prs
+                "[%s] %sCurrent quota allows processing ~%d PRs max",
+                repo_ctx,
+                chunk_info,
+                max_prs,
             )
             return False, max_prs
 
@@ -279,9 +288,13 @@ class GitHubClient:
                         "GitHub API forbidden: insufficient permissions or invalid token."
                     )
             elif e.response.status_code == 401:
-                raise GitHubAPIError("GitHub API unauthorized: invalid or expired token.")
+                raise GitHubAPIError(
+                    "GitHub API unauthorized: invalid or expired token."
+                )
             elif e.response.status_code == 404:
-                raise GitHubAPIError("Repository not found or insufficient permissions.")
+                raise GitHubAPIError(
+                    "Repository not found or insufficient permissions."
+                )
             else:
                 raise GitHubAPIError(f"GitHub API error: {e}")
         except requests.exceptions.RequestException as e:
@@ -344,7 +357,7 @@ class GitHubClient:
 
                 if next_url:
                     current_url = next_url
-                    current_params = None  # Next URL already includes params
+                    current_params = {}  # Next URL already includes params
                 else:
                     break  # No more pages
 
@@ -352,8 +365,12 @@ class GitHubClient:
                 if e.response.status_code == 403:
                     rate_limit = e.response.headers.get("X-RateLimit-Remaining")
                     if rate_limit == "0":
-                        reset_time = e.response.headers.get("X-RateLimit-Reset", "unknown")
-                        auth_status = "authenticated" if self._token else "unauthenticated"
+                        reset_time = e.response.headers.get(
+                            "X-RateLimit-Reset", "unknown"
+                        )
+                        auth_status = (
+                            "authenticated" if self._token else "unauthenticated"
+                        )
                         raise GitHubAPIError(
                             f"GitHub API rate limit exceeded ({auth_status}). "
                             f"Rate limit resets at {reset_time}. "
@@ -364,9 +381,13 @@ class GitHubClient:
                             "GitHub API forbidden: insufficient permissions or invalid token."
                         )
                 elif e.response.status_code == 401:
-                    raise GitHubAPIError("GitHub API unauthorized: invalid or expired token.")
+                    raise GitHubAPIError(
+                        "GitHub API unauthorized: invalid or expired token."
+                    )
                 elif e.response.status_code == 404:
-                    raise GitHubAPIError("Repository not found or insufficient permissions.")
+                    raise GitHubAPIError(
+                        "Repository not found or insufficient permissions."
+                    )
                 else:
                     raise GitHubAPIError(f"GitHub API error: {e}")
             except requests.exceptions.RequestException as e:
@@ -467,7 +488,9 @@ class GitHubClient:
                 self._logger.debug("Cannot access %s/%s: %s", owner, repo, e)
             return False
 
-    def fetch_timeline_events(self, owner: str, repo: str, pr_number: int) -> List[Dict[str, Any]]:
+    def fetch_timeline_events(
+        self, owner: str, repo: str, pr_number: int
+    ) -> List[Dict[str, Any]]:
         """Fetch all timeline events for a PR with pagination."""
         url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{pr_number}/events"
         return self._make_paginated_request(url)
@@ -480,7 +503,9 @@ class GitHubClient:
         """Fetch all review comments with pagination."""
         return self._make_paginated_request(review_comments_url)
 
-    def fetch_reviews(self, owner: str, repo: str, pr_number: int) -> List[Dict[str, Any]]:
+    def fetch_reviews(
+        self, owner: str, repo: str, pr_number: int
+    ) -> List[Dict[str, Any]]:
         """Fetch all reviews for a PR with pagination."""
         url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
         return self._make_paginated_request(url)
@@ -488,4 +513,5 @@ class GitHubClient:
     def fetch_single_pr(self, owner: str, repo: str, pr_number: int) -> Dict[str, Any]:
         """Fetch a single pull request by number."""
         url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}"
-        return self.make_request(url)
+        result: Dict[str, Any] = self.make_request(url)
+        return result

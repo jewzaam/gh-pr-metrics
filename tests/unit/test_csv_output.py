@@ -297,7 +297,9 @@ class TestCSVOutput:
                 "errors": "",
             }
         ]
-        gh_pr_metrics.csv_manager.write_csv(updated_metrics, str(csv_file), merge_mode=True)
+        gh_pr_metrics.csv_manager.write_csv(
+            updated_metrics, str(csv_file), merge_mode=True
+        )
 
         # Verify PR 1 is updated
         with open(csv_file, "r", encoding="utf-8") as f:

@@ -41,7 +41,9 @@ class TestPRStatusDetermination:
         requests_mock.get(events_url, json=[])
         requests_mock.get(pr["comments_url"], json=[])
         requests_mock.get(pr["review_comments_url"], json=[])
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
         requests_mock.get(reviews_url, json=[])
 
         result = gh_pr_metrics.process_pr(pr, {}, "owner", "repo", None, default_config)
@@ -75,7 +77,9 @@ class TestPRStatusDetermination:
         requests_mock.get(events_url, json=[])
         requests_mock.get(pr["comments_url"], json=[])
         requests_mock.get(pr["review_comments_url"], json=[])
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
         requests_mock.get(reviews_url, json=[])
 
         result = gh_pr_metrics.process_pr(pr, {}, "owner", "repo", None, default_config)
@@ -95,7 +99,9 @@ class TestGetReadyForReviewFromEvents:
 
     def test_no_events(self):
         """Returns created_at when no events."""
-        result = gh_pr_metrics.get_ready_for_review_from_events([], "2024-01-01T00:00:00Z")
+        result = gh_pr_metrics.get_ready_for_review_from_events(
+            [], "2024-01-01T00:00:00Z"
+        )
         assert result == "2024-01-01T00:00:00Z"
 
     def test_no_ready_events(self):
@@ -103,7 +109,9 @@ class TestGetReadyForReviewFromEvents:
         events = [
             {"event": "labeled", "created_at": "2024-01-02T00:00:00Z"},
         ]
-        result = gh_pr_metrics.get_ready_for_review_from_events(events, "2024-01-01T00:00:00Z")
+        result = gh_pr_metrics.get_ready_for_review_from_events(
+            events, "2024-01-01T00:00:00Z"
+        )
         assert result == "2024-01-01T00:00:00Z"
 
     def test_single_ready_event(self):
@@ -111,7 +119,9 @@ class TestGetReadyForReviewFromEvents:
         events = [
             {"event": "ready_for_review", "created_at": "2024-01-03T00:00:00Z"},
         ]
-        result = gh_pr_metrics.get_ready_for_review_from_events(events, "2024-01-01T00:00:00Z")
+        result = gh_pr_metrics.get_ready_for_review_from_events(
+            events, "2024-01-01T00:00:00Z"
+        )
         assert result == "2024-01-03T00:00:00Z"
 
     def test_multiple_ready_events_uses_last(self):
@@ -121,7 +131,9 @@ class TestGetReadyForReviewFromEvents:
             {"event": "convert_to_draft", "created_at": "2024-01-03T00:00:00Z"},
             {"event": "ready_for_review", "created_at": "2024-01-04T00:00:00Z"},
         ]
-        result = gh_pr_metrics.get_ready_for_review_from_events(events, "2024-01-01T00:00:00Z")
+        result = gh_pr_metrics.get_ready_for_review_from_events(
+            events, "2024-01-01T00:00:00Z"
+        )
         assert result == "2024-01-04T00:00:00Z"
 
     def test_none_entries_filtered(self):
@@ -131,7 +143,9 @@ class TestGetReadyForReviewFromEvents:
             {"event": "ready_for_review", "created_at": "2024-01-02T00:00:00Z"},
             None,
         ]
-        result = gh_pr_metrics.get_ready_for_review_from_events(events, "2024-01-01T00:00:00Z")
+        result = gh_pr_metrics.get_ready_for_review_from_events(
+            events, "2024-01-01T00:00:00Z"
+        )
         assert result == "2024-01-02T00:00:00Z"
 
 
@@ -142,7 +156,9 @@ class TestFetchAndNormalizeTimelineEvents:
         """Filters None, extracts event and created_at."""
         from github_api import GitHubClient
 
-        client = GitHubClient("fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger)
+        client = GitHubClient(
+            "fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
         requests_mock.get(
             "https://api.github.com/repos/o/r/issues/1/events",
             json=[
@@ -176,7 +192,9 @@ class TestFetchAndNormalizeTimelineEvents:
         """Returns empty list when no events."""
         from github_api import GitHubClient
 
-        client = GitHubClient("fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger)
+        client = GitHubClient(
+            "fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
         requests_mock.get(
             "https://api.github.com/repos/o/r/issues/1/events",
             json=[],
@@ -189,7 +207,9 @@ class TestFetchAndNormalizeTimelineEvents:
         """GitHubAPIError is not caught — callers handle it."""
         from github_api import GitHubClient, GitHubAPIError
 
-        client = GitHubClient("fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger)
+        client = GitHubClient(
+            "fake_token", gh_pr_metrics.quota_manager, gh_pr_metrics.logger
+        )
         requests_mock.get(
             "https://api.github.com/repos/o/r/issues/1/events",
             status_code=500,
@@ -282,7 +302,9 @@ class TestReadyForReviewTime:
         result = gh_pr_metrics.get_ready_for_review_time(pr, "owner", "repo", None)
         assert result == "2024-01-02T00:00:00Z"
 
-    def test_ready_for_review_ghost_user_in_reviews(self, requests_mock, default_config):
+    def test_ready_for_review_ghost_user_in_reviews(
+        self, requests_mock, default_config
+    ):
         """Test PR with ghost user (deleted account) in reviews doesn't crash."""
         pr = {
             "number": 1,
@@ -370,10 +392,12 @@ class TestCommentCounting:
 
         requests_mock.get(pr["comments_url"], json=[])
         requests_mock.get(pr["review_comments_url"], json=[])
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
 
-        total, non_ai_bot, ai_bot, non_ai_bot_names, ai_bot_names = gh_pr_metrics.count_comments(
-            pr, "owner", "repo", None, default_config
+        total, non_ai_bot, ai_bot, non_ai_bot_names, ai_bot_names = (
+            gh_pr_metrics.count_comments(pr, "owner", "repo", None, default_config)
         )
         assert total == 0
         assert non_ai_bot == 0
@@ -397,12 +421,15 @@ class TestCommentCounting:
             ],
         )
         requests_mock.get(
-            pr["review_comments_url"], json=[{"user": {"type": "User", "login": "user3"}}]
+            pr["review_comments_url"],
+            json=[{"user": {"type": "User", "login": "user3"}}],
         )
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
 
-        total, non_ai_bot, ai_bot, non_ai_bot_names, ai_bot_names = gh_pr_metrics.count_comments(
-            pr, "owner", "repo", None, default_config
+        total, non_ai_bot, ai_bot, non_ai_bot_names, ai_bot_names = (
+            gh_pr_metrics.count_comments(pr, "owner", "repo", None, default_config)
         )
         assert total == 3
         assert non_ai_bot == 0
@@ -426,12 +453,15 @@ class TestCommentCounting:
             ],
         )
         requests_mock.get(
-            pr["review_comments_url"], json=[{"user": {"type": "Bot", "login": "dependabot[bot]"}}]
+            pr["review_comments_url"],
+            json=[{"user": {"type": "Bot", "login": "dependabot[bot]"}}],
         )
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
 
-        total, non_ai_bot, ai_bot, non_ai_bot_names, ai_bot_names = gh_pr_metrics.count_comments(
-            pr, "owner", "repo", None, default_config
+        total, non_ai_bot, ai_bot, non_ai_bot_names, ai_bot_names = (
+            gh_pr_metrics.count_comments(pr, "owner", "repo", None, default_config)
         )
         assert total == 3
         assert non_ai_bot == 2
@@ -456,13 +486,16 @@ class TestCommentCounting:
             ],
         )
         requests_mock.get(
-            pr["review_comments_url"], json=[{"user": {"type": "Bot", "login": "cursor[bot]"}}]
+            pr["review_comments_url"],
+            json=[{"user": {"type": "Bot", "login": "cursor[bot]"}}],
         )
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
 
         # Test with default CLI pattern
-        total, non_ai_bot, ai_bot, non_ai_bot_names, ai_bot_names = gh_pr_metrics.count_comments(
-            pr, "owner", "repo", None, default_config
+        total, non_ai_bot, ai_bot, non_ai_bot_names, ai_bot_names = (
+            gh_pr_metrics.count_comments(pr, "owner", "repo", None, default_config)
         )
         assert total == 4
         assert non_ai_bot == 1
@@ -470,7 +503,9 @@ class TestCommentCounting:
         assert non_ai_bot_names == "github-actions[bot]"
         assert ai_bot_names == "cursor[bot]"
 
-    def test_count_comments_with_none_ai_bot_pattern(self, requests_mock, default_config):
+    def test_count_comments_with_none_ai_bot_pattern(
+        self, requests_mock, default_config
+    ):
         """Test that empty ai_bots config treats all bots as non-AI bots."""
         pr = {
             "number": 1,
@@ -487,16 +522,21 @@ class TestCommentCounting:
             ],
         )
         requests_mock.get(
-            pr["review_comments_url"], json=[{"user": {"type": "Bot", "login": "cursor[bot]"}}]
+            pr["review_comments_url"],
+            json=[{"user": {"type": "Bot", "login": "cursor[bot]"}}],
         )
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
 
         # Create config with no AI bots defined
-        empty_config = gh_pr_metrics.Config({"ai_bots": {"always": [], "conditional": []}})
+        empty_config = gh_pr_metrics.Config(
+            {"ai_bots": {"always": [], "conditional": []}}
+        )
 
         # Test with empty config - all bots should be non-AI
-        total, non_ai_bot, ai_bot, non_ai_bot_names, ai_bot_names = gh_pr_metrics.count_comments(
-            pr, "owner", "repo", None, empty_config
+        total, non_ai_bot, ai_bot, non_ai_bot_names, ai_bot_names = (
+            gh_pr_metrics.count_comments(pr, "owner", "repo", None, empty_config)
         )
         assert total == 4
         assert non_ai_bot == 3  # All bots are non-AI when no patterns configured
@@ -543,7 +583,10 @@ class TestCommentCounting:
                     "conditional": [
                         {
                             "name": "github-actions\\[bot\\]",
-                            "content_patterns": ["Code Review Summary", "Files Reviewed"],
+                            "content_patterns": [
+                                "Code Review Summary",
+                                "Files Reviewed",
+                            ],
                             "match_any": True,
                         }
                     ]
@@ -551,8 +594,8 @@ class TestCommentCounting:
             }
         )
 
-        total, non_ai_bot, ai_bot, non_ai_bot_names, ai_bot_names = gh_pr_metrics.count_comments(
-            pr, "owner", "repo", None, ai_review_config
+        total, non_ai_bot, ai_bot, non_ai_bot_names, ai_bot_names = (
+            gh_pr_metrics.count_comments(pr, "owner", "repo", None, ai_review_config)
         )
 
         # Should count the AI review body as 1 AI bot comment
@@ -571,12 +614,16 @@ class TestReviewMetrics:
         reviews_url = "https://api.github.com/repos/owner/repo/pulls/1/reviews"
         requests_mock.get(reviews_url, json=[])
 
-        changes, unique, approvals = gh_pr_metrics.get_review_metrics(pr, "owner", "repo", None)
+        changes, unique, approvals = gh_pr_metrics.get_review_metrics(
+            pr, "owner", "repo", None
+        )
         assert changes == 0
         assert unique == 0
         assert approvals == 0
 
-    def test_get_review_metrics_with_changes_requested(self, requests_mock, default_config):
+    def test_get_review_metrics_with_changes_requested(
+        self, requests_mock, default_config
+    ):
         """Test counting change requests."""
         pr = {"number": 1}
         reviews_url = "https://api.github.com/repos/owner/repo/pulls/1/reviews"
@@ -589,7 +636,9 @@ class TestReviewMetrics:
             ],
         )
 
-        changes, unique, approvals = gh_pr_metrics.get_review_metrics(pr, "owner", "repo", None)
+        changes, unique, approvals = gh_pr_metrics.get_review_metrics(
+            pr, "owner", "repo", None
+        )
         assert changes == 3  # Total count
         assert unique == 2  # Unique reviewers
         assert approvals == 0
@@ -606,12 +655,16 @@ class TestReviewMetrics:
             ],
         )
 
-        changes, unique, approvals = gh_pr_metrics.get_review_metrics(pr, "owner", "repo", None)
+        changes, unique, approvals = gh_pr_metrics.get_review_metrics(
+            pr, "owner", "repo", None
+        )
         assert changes == 0
         assert unique == 0
         assert approvals == 2
 
-    def test_get_review_metrics_reviewer_changes_state(self, requests_mock, default_config):
+    def test_get_review_metrics_reviewer_changes_state(
+        self, requests_mock, default_config
+    ):
         """Test when reviewer changes their review state."""
         pr = {"number": 1}
         reviews_url = "https://api.github.com/repos/owner/repo/pulls/1/reviews"
@@ -623,7 +676,9 @@ class TestReviewMetrics:
             ],
         )
 
-        changes, unique, approvals = gh_pr_metrics.get_review_metrics(pr, "owner", "repo", None)
+        changes, unique, approvals = gh_pr_metrics.get_review_metrics(
+            pr, "owner", "repo", None
+        )
         assert changes == 1  # Total change requests
         assert unique == 1  # Unique reviewer who requested changes
         assert approvals == 1  # Most recent state is approved
@@ -649,11 +704,17 @@ class TestDerivedTimeMetrics:
         }
 
         # Mock API calls
-        requests_mock.get("https://api.github.com/repos/owner/repo/issues/1/events", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/issues/1/events", json=[]
+        )
         requests_mock.get(pr["comments_url"], json=[])
         requests_mock.get(pr["review_comments_url"], json=[])
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
 
         result = gh_pr_metrics.process_pr(pr, {}, "owner", "repo", None, default_config)
 
@@ -683,8 +744,12 @@ class TestDerivedTimeMetrics:
         )
         requests_mock.get(pr["comments_url"], json=[])
         requests_mock.get(pr["review_comments_url"], json=[])
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
 
         result = gh_pr_metrics.process_pr(pr, {}, "owner", "repo", None, default_config)
 
@@ -716,11 +781,17 @@ class TestDerivedTimeMetrics:
         }
 
         # Mock API calls
-        requests_mock.get("https://api.github.com/repos/owner/repo/issues/1/events", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/issues/1/events", json=[]
+        )
         requests_mock.get(pr["comments_url"], json=[])
         requests_mock.get(pr["review_comments_url"], json=[])
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
 
         result = gh_pr_metrics.process_pr(pr, {}, "owner", "repo", None, default_config)
 
@@ -745,11 +816,17 @@ class TestDerivedTimeMetrics:
         }
 
         # Mock API calls
-        requests_mock.get("https://api.github.com/repos/owner/repo/issues/1/events", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/issues/1/events", json=[]
+        )
         requests_mock.get(pr["comments_url"], json=[])
         requests_mock.get(pr["review_comments_url"], json=[])
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
 
         result = gh_pr_metrics.process_pr(pr, {}, "owner", "repo", None, default_config)
 
@@ -782,11 +859,17 @@ class TestComplexityMetrics:
         }
 
         # Mock API calls
-        requests_mock.get("https://api.github.com/repos/owner/repo/issues/1/events", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/issues/1/events", json=[]
+        )
         requests_mock.get(pr["comments_url"], json=[])
         requests_mock.get(pr["review_comments_url"], json=[])
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
 
         result = gh_pr_metrics.process_pr(pr, {}, "owner", "repo", None, default_config)
 
@@ -813,11 +896,17 @@ class TestComplexityMetrics:
         }
 
         # Mock API calls
-        requests_mock.get("https://api.github.com/repos/owner/repo/issues/1/events", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/issues/1/events", json=[]
+        )
         requests_mock.get(pr["comments_url"], json=[])
         requests_mock.get(pr["review_comments_url"], json=[])
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
 
         result = gh_pr_metrics.process_pr(pr, {}, "owner", "repo", None, default_config)
 
@@ -846,11 +935,17 @@ class TestComplexityMetrics:
         }
 
         # Mock API calls
-        requests_mock.get("https://api.github.com/repos/owner/repo/issues/1/events", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/issues/1/events", json=[]
+        )
         requests_mock.get(pr["comments_url"], json=[])
         requests_mock.get(pr["review_comments_url"], json=[])
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
-        requests_mock.get("https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[])
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
+        requests_mock.get(
+            "https://api.github.com/repos/owner/repo/pulls/1/reviews", json=[]
+        )
 
         result = gh_pr_metrics.process_pr(pr, {}, "owner", "repo", None, default_config)
 
@@ -1007,7 +1102,7 @@ class TestReprocessRepository:
         result = gh_pr_metrics.reprocess_repository(
             "owner", "repo", csv_file, default_config, workers=1
         )
-        assert result == gh_pr_metrics.EXIT_CODE_SUCCESS
+        assert result == gh_pr_metrics.EXIT_SUCCESS
 
         import csv as csv_mod
 
@@ -1064,8 +1159,10 @@ class TestReprocessRepository:
             }
         )
 
-        result = gh_pr_metrics.reprocess_repository("owner", "repo", csv_file, config, workers=1)
-        assert result == gh_pr_metrics.EXIT_CODE_SUCCESS
+        result = gh_pr_metrics.reprocess_repository(
+            "owner", "repo", csv_file, config, workers=1
+        )
+        assert result == gh_pr_metrics.EXIT_SUCCESS
 
         import csv as csv_mod
 
@@ -1086,7 +1183,7 @@ class TestReprocessRepository:
             "owner", "repo", csv_file, default_config, workers=1
         )
 
-        assert result == gh_pr_metrics.EXIT_CODE_SUCCESS
+        assert result == gh_pr_metrics.EXIT_SUCCESS
 
     def test_no_cache_dir(self, tmp_path, default_config):
         """Test reprocess with no cached JSON directory."""
@@ -1099,7 +1196,7 @@ class TestReprocessRepository:
             "owner", "repo", csv_file, default_config, workers=1
         )
 
-        assert result == gh_pr_metrics.EXIT_CODE_SUCCESS
+        assert result == gh_pr_metrics.EXIT_SUCCESS
 
     def test_skips_prs_without_cache(self, tmp_path, default_config):
         """Test that PRs without cached JSON are left unchanged."""
@@ -1129,7 +1226,7 @@ class TestReprocessRepository:
         result = gh_pr_metrics.reprocess_repository(
             "owner", "repo", csv_file, default_config, workers=1
         )
-        assert result == gh_pr_metrics.EXIT_CODE_SUCCESS
+        assert result == gh_pr_metrics.EXIT_SUCCESS
 
         import csv as csv_mod
 

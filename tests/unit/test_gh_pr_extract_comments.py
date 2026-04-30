@@ -15,6 +15,73 @@ import gh_pr_extract_comments
 from github_api import GitHubAPIError
 
 
+class TestArgumentParsing:
+    """Test argument parsing for gh-pr-extract-comments CLI."""
+
+    def test_parse_arguments_required_flags(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "gh-pr-extract-comments",
+                "--csv-dir",
+                "data/",
+                "--output-dir",
+                "out/",
+                "--start-date",
+                "2024-01-01",
+            ],
+        ):
+            args = gh_pr_extract_comments.parse_arguments()
+            assert args.csv_dir == "data/"
+            assert args.output_dir == "out/"
+            assert args.start_date == "2024-01-01"
+            assert args.count == 1
+            assert args.debug is False
+
+    def test_parse_arguments_with_count(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "gh-pr-extract-comments",
+                "--csv-dir",
+                "data/",
+                "--output-dir",
+                "out/",
+                "--start-date",
+                "2024-01-01",
+                "--count",
+                "5",
+            ],
+        ):
+            args = gh_pr_extract_comments.parse_arguments()
+            assert args.count == 5
+
+    def test_parse_arguments_with_debug(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "gh-pr-extract-comments",
+                "--csv-dir",
+                "data/",
+                "--output-dir",
+                "out/",
+                "--start-date",
+                "2024-01-01",
+                "--debug",
+            ],
+        ):
+            args = gh_pr_extract_comments.parse_arguments()
+            assert args.debug is True
+
+    def test_parse_arguments_missing_required(self):
+        with mock.patch.object(sys, "argv", ["gh-pr-extract-comments"]):
+            with pytest.raises(SystemExit):
+                gh_pr_extract_comments.parse_arguments()
+
+
 class TestSetupLogging:
     """Test logging configuration."""
 
@@ -180,7 +247,9 @@ class TestReadPrsFromCsv:
     def test_returns_empty_list_for_nonexistent_file(self):
         """Test returns empty list when CSV file doesn't exist."""
         start_date = datetime(2024, 1, 1, tzinfo=timezone.utc)
-        result = gh_pr_extract_comments.read_prs_from_csv("/nonexistent.csv", start_date, 5)
+        result = gh_pr_extract_comments.read_prs_from_csv(
+            "/nonexistent.csv", start_date, 5
+        )
         assert result == []
 
     def test_reads_prs_from_valid_csv(self, tmp_path):
@@ -350,7 +419,9 @@ class TestFetchPrDetails:
             }
         ]
 
-        result = gh_pr_extract_comments.fetch_pr_details(mock_client, "owner", "repo", 123)
+        result = gh_pr_extract_comments.fetch_pr_details(
+            mock_client, "owner", "repo", 123
+        )
 
         assert result is not None
         assert result["pr_number"] == 123
@@ -379,7 +450,9 @@ class TestFetchPrDetails:
         mock_client.fetch_review_comments.side_effect = GitHubAPIError("API Error", 500)
         mock_client.fetch_reviews.side_effect = GitHubAPIError("API Error", 500)
 
-        result = gh_pr_extract_comments.fetch_pr_details(mock_client, "owner", "repo", 123)
+        result = gh_pr_extract_comments.fetch_pr_details(
+            mock_client, "owner", "repo", 123
+        )
 
         assert result is not None
         assert result["pr_number"] == 123
@@ -392,7 +465,9 @@ class TestFetchPrDetails:
         mock_client = mock.Mock()
         mock_client.fetch_single_pr.side_effect = GitHubAPIError("Not found", 404)
 
-        result = gh_pr_extract_comments.fetch_pr_details(mock_client, "owner", "repo", 123)
+        result = gh_pr_extract_comments.fetch_pr_details(
+            mock_client, "owner", "repo", 123
+        )
 
         assert result is None
 
@@ -421,7 +496,9 @@ class TestFetchPrDetails:
         mock_client.fetch_review_comments.return_value = []
         mock_client.fetch_reviews.return_value = []
 
-        result = gh_pr_extract_comments.fetch_pr_details(mock_client, "owner", "repo", 123)
+        result = gh_pr_extract_comments.fetch_pr_details(
+            mock_client, "owner", "repo", 123
+        )
 
         assert result["pr_number"] == 123
         assert result["title"] == "Test PR"
@@ -516,7 +593,9 @@ class TestParseArguments:
 
     def test_requires_output_dir(self):
         """Test requires --output-dir argument."""
-        with mock.patch.object(sys, "argv", ["gh-pr-extract-comments", "--csv-dir", "data/"]):
+        with mock.patch.object(
+            sys, "argv", ["gh-pr-extract-comments", "--csv-dir", "data/"]
+        ):
             with pytest.raises(SystemExit):
                 gh_pr_extract_comments.parse_arguments()
 
@@ -706,7 +785,9 @@ class TestMain:
 
     @mock.patch("gh_pr_extract_comments.get_tracked_repos_with_csv")
     @mock.patch("gh_pr_extract_comments.read_prs_from_csv")
-    def test_fails_when_no_prs_match_criteria(self, mock_read_prs, mock_get_repos, tmp_path):
+    def test_fails_when_no_prs_match_criteria(
+        self, mock_read_prs, mock_get_repos, tmp_path
+    ):
         """Test returns error when no PRs match criteria."""
         csv_dir = tmp_path / "csv"
         csv_dir.mkdir()
@@ -752,7 +833,11 @@ class TestMain:
         # Mock quota manager to show insufficient quota
         mock_manager = mock.Mock()
         mock_manager.initialize.return_value = {"remaining": 100, "limit": 5000}
-        mock_manager.get_current_quota.return_value = (10, 5000, None)  # Only 10 remaining
+        mock_manager.get_current_quota.return_value = (
+            10,
+            5000,
+            None,
+        )  # Only 10 remaining
         mock_quota_manager.return_value = mock_manager
 
         with mock.patch.object(
@@ -854,8 +939,14 @@ class TestMain:
             {"owner": "owner", "repo": "repo", "csv_file": str(tmp_path / "test.csv")}
         ]
         mock_read_prs.return_value = [
-            {"pr_number": 123, "created_at": datetime(2024, 1, 15, tzinfo=timezone.utc)},
-            {"pr_number": 124, "created_at": datetime(2024, 1, 14, tzinfo=timezone.utc)},
+            {
+                "pr_number": 123,
+                "created_at": datetime(2024, 1, 15, tzinfo=timezone.utc),
+            },
+            {
+                "pr_number": 124,
+                "created_at": datetime(2024, 1, 14, tzinfo=timezone.utc),
+            },
         ]
 
         # Mock quota manager

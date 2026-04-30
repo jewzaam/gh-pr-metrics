@@ -52,7 +52,9 @@ class TestChunkDeduplication:
         processed_pr_numbers = set()
 
         # Process chunk 1
-        new_prs_chunk1 = [pr for pr in chunk1_prs if pr["number"] not in processed_pr_numbers]
+        new_prs_chunk1 = [
+            pr for pr in chunk1_prs if pr["number"] not in processed_pr_numbers
+        ]
         for pr in new_prs_chunk1:
             processed_pr_numbers.add(pr["number"])
 
@@ -61,7 +63,9 @@ class TestChunkDeduplication:
         assert new_prs_chunk1[0]["number"] == 100
 
         # Process chunk 2
-        new_prs_chunk2 = [pr for pr in chunk2_prs if pr["number"] not in processed_pr_numbers]
+        new_prs_chunk2 = [
+            pr for pr in chunk2_prs if pr["number"] not in processed_pr_numbers
+        ]
         for pr in new_prs_chunk2:
             processed_pr_numbers.add(pr["number"])
 

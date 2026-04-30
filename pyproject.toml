@@ -12,14 +12,12 @@ authors = [
     {name = "Naveen Malik", email = "jewzaam@gmail.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.14"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
     "requests>=2.28.0",
@@ -64,11 +62,11 @@ markers = [
 ]
 
 [tool.black]
-line-length = 100
-target-version = ["py310", "py311", "py312"]
+line-length = 88
+target-version = ["py314"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.14"
 warn_return_any = true
 warn_unused_configs = true
 

@@ -103,13 +103,17 @@ class TestConfigDefaults:
         # Should use defaults
         assert config.workers == 4
         assert config.log_file == "gh-pr-metrics.log"
-        assert config.raw_data_dir  # Verify raw_data_dir is set (value may be test-isolated)
+        assert (
+            config.raw_data_dir
+        )  # Verify raw_data_dir is set (value may be test-isolated)
         assert config.always_ai_bots == []
         assert config.conditional_bots == []
 
     def test_config_with_partial_dict(self):
         """Test Config with partial configuration."""
-        config = gh_pr_metrics.Config({"workers": 2, "ai_bots": {"always": ["test-bot"]}})
+        config = gh_pr_metrics.Config(
+            {"workers": 2, "ai_bots": {"always": ["test-bot"]}}
+        )
 
         assert config.workers == 2
         assert config.always_ai_bots == ["test-bot"]
@@ -139,7 +143,10 @@ class TestAIBotDetection:
                     "conditional": [
                         {
                             "name": "github-actions\\[bot\\]",
-                            "content_patterns": ["Code Review Summary", "Files Reviewed"],
+                            "content_patterns": [
+                                "Code Review Summary",
+                                "Files Reviewed",
+                            ],
                             "match_any": True,
                         }
                     ]
@@ -149,7 +156,10 @@ class TestAIBotDetection:
 
         # Matches pattern
         assert (
-            config.is_ai_bot("github-actions[bot]", "📋 Code Review Summary\nSome details") is True
+            config.is_ai_bot(
+                "github-actions[bot]", "📋 Code Review Summary\nSome details"
+            )
+            is True
         )
         assert config.is_ai_bot("github-actions[bot]", "Files Reviewed: 5") is True
 
@@ -167,7 +177,10 @@ class TestAIBotDetection:
                     "conditional": [
                         {
                             "name": "github-actions\\[bot\\]",
-                            "content_patterns": ["Code Review Summary", "Files Reviewed"],
+                            "content_patterns": [
+                                "Code Review Summary",
+                                "Files Reviewed",
+                            ],
                             "match_any": False,
                         }
                     ]
@@ -177,7 +190,9 @@ class TestAIBotDetection:
 
         # Both patterns present
         assert (
-            config.is_ai_bot("github-actions[bot]", "Code Review Summary\nFiles Reviewed: 5")
+            config.is_ai_bot(
+                "github-actions[bot]", "Code Review Summary\nFiles Reviewed: 5"
+            )
             is True
         )
 

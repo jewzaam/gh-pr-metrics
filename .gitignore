@@ -29,7 +29,11 @@ coverage.xml
 .hypothesis/
 .coverage-percentage
 
+# Type checking
+.mypy_cache/
+
 # Virtual environments
+.venv/
 venv/
 ENV/
 env/

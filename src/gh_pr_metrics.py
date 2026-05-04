@@ -1300,6 +1300,7 @@ class QuotaPrefixFilter(logging.Filter):
 
 quota_manager = QuotaManager()
 logger = logging.getLogger(__name__)
+logger.addFilter(QuotaPrefixFilter(quota_manager))
 state_manager = StateManager(logger=logger)
 github_client: Optional[GitHubClient] = None  # Initialized in main()
 csv_manager = CSVManager(logger=logger)
